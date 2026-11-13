@@ -209,7 +209,14 @@ function buildDom(context: RoomContext): RoomRefs {
   document.addEventListener('keyup', onKeyUp);
 
   setMode(store.prefs.mode);
-  renderTrackBasics(context.initialTrack);
+  if (context.initialTrack) {
+    renderTrackBasics(context.initialTrack);
+  } else {
+    // Followed playlists don't expose their items, so the first track arrives
+    // with the SDK's first player-state event.
+    trackTitle.textContent = context.playlistName ?? 'Starting playback…';
+    trackArtists.textContent = 'Waiting for the first song from Spotify…';
+  }
 
   return {
     statusDot, statusText, trackArt, trackTitle, trackArtists, upNext,

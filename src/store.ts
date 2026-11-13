@@ -11,7 +11,8 @@ export interface RoomContext {
   playlistName?: string;
   startTrackUri?: string;
   looseUris?: string[];
-  initialTrack: Track;
+  /** Absent when a followed playlist is played from the top (Spotify hides its items). */
+  initialTrack?: Track;
 }
 
 export interface Prefs {

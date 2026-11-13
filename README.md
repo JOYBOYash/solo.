@@ -16,8 +16,10 @@ original vocals pick the song straight back up — a duet, solo.
 ## What it actually does
 
 - **Library** — your real Spotify playlists (and Spotify-wide song search) load
-  straight into the app. No sample data. Playlist headers pick up a gradient
-  tint from the artwork, Spotify-style.
+  straight into the app. No sample data. Song search runs as you type, with
+  "load more" paging. Playlist headers pick up a gradient tint from the
+  artwork, Spotify-style. Playlists you follow are playable from the start even
+  though Spotify no longer exposes their song lists (see below).
 - **Room** — a dark performance stage: the song plays through the Spotify Web
   Playback SDK, time-synced lyrics stream from LRCLIB (free, no key), your live
   mic level and detected note are metered, and the background glows with the
@@ -94,7 +96,7 @@ your 5 added users.
 | **Vercel** | Import the repo — `vercel.json` handles the SPA fallback for `/callback`. |
 | **Netlify** | Connect the repo — `netlify.toml` sets `npm run build`, publishes `dist/`, and adds the `/callback` fallback. |
 | **Firebase Hosting** | `npm i -g firebase-tools && firebase login && firebase use --add`, then `npm run build && firebase deploy` — `firebase.json` includes the rewrite. |
-| **GitHub Pages** | Deploy the `dist/` of `npm run build:pages` (builds with a relative base and copies `index.html` to `404.html` so `/callback` resolves). Serve from the repo's Pages branch. |
+| **GitHub Pages** | Push to `master` — the workflow in `.github/workflows/deploy.yml` runs `npm run build:pages` (relative base, `index.html` copied to `404.html` so `/callback` resolves) and deploys `dist/` through GitHub Actions. Pages must be enabled for the repo; the workflow asks GitHub to create the site on its first run. |
 
 ### After deploying
 
@@ -141,10 +143,26 @@ src/
     config.ts        Client ID storage, portable redirect URI
 ```
 
-Notes on API choices: Spotify deprecated `audio-features`, `audio-analysis`,
-`recommendations` and related endpoints for new apps in November 2024 — Solo
-uses none of them. Everything (voice detection, lyric sync, progress) is
-computed live from the mic and the playback state instead.
+Notes on API choices: Spotify's **February 2026 Dev Mode changes** reshaped
+what a new app can read. Solo is built around the new rules:
+
+- Search returns at most **10** results per request (the old maximum was 50),
+  so song search pages with `offset` and a "Load more results" button.
+- A playlist's songs now live at `GET /playlists/{id}/items` (the old
+  `/tracks` endpoint was removed), and Spotify only exposes items for playlists
+  the user **owns or collaborates on**. Followed playlists show their metadata
+  and a **Play from the start** action instead; Solo reads the now-playing track
+  from the Playback SDK and keeps the duet/lyrics flow running.
+- Playlist song counts come from `items.total`; followed playlists often omit
+  it, so their cards fall back to the owner's name.
+- `GET /me` no longer returns `product`; the Premium badge and warning banner
+  are hidden when Spotify doesn't report a plan. Playback itself still requires
+  a Premium account, and the SDK reports any account limitation when you start.
+
+Spotify deprecated `audio-features`, `audio-analysis`, `recommendations` and
+related endpoints for new apps in November 2024 — Solo uses none of them.
+Everything (voice detection, lyric sync, progress) is computed live from the
+mic and the playback state instead.
 
 ## Troubleshooting
 

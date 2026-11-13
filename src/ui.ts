@@ -7,7 +7,10 @@ import {
   getPlaylistDetail,
   getPlaylistTracks,
   searchTracks,
+  playlistSongCount,
+  PlaylistLockedError,
   type Playlist,
+  type PlaylistDetail,
   type Track,
 } from './lib/api';
 import { formatMs } from './lib/clean';
@@ -38,11 +41,15 @@ function shell(content: HTMLElement): void {
                 { class: 'user-chip' },
                 avatar(me.images, me.display_name ?? me.id),
                 el('span', { class: 'user-name' }, me.display_name ?? me.id),
-                el(
-                  'span',
-                  { class: 'plan-badge' },
-                  me.product === 'premium' ? 'Premium' : me.product === 'open' ? 'Free plan' : me.product,
-                ),
+                // product was removed from /me in February 2026; hide the badge
+                // when Spotify doesn't return a plan.
+                me.product
+                  ? el(
+                      'span',
+                      { class: 'plan-badge' },
+                      me.product === 'premium' ? 'Premium' : me.product === 'free' || me.product === 'open' ? 'Free plan' : me.product,
+                    )
+                  : null,
               )
             : null,
           isLoggedIn()
@@ -268,13 +275,20 @@ export function renderLibraryScreen(): void {
   let debounce = 0;
   search.addEventListener('input', () => {
     window.clearTimeout(debounce);
-    debounce = window.setTimeout(() => void maybeSearchSongs(), 350);
+    refreshLibraryLists();
+    // Songs stream in as you type; playlists filter instantly.
+    if (scope === 'songs') {
+      debounce = window.setTimeout(() => void maybeSearchSongs({ fresh: true }), 300);
+    }
   });
   refreshLibraryLists();
 }
 
 let scope: 'playlists' | 'songs' = 'playlists';
 let songResults: Track[] = [];
+let songTotal = 0;
+let searching = false;
+let searchSeq = 0;
 let lastQuery = '';
 
 function setScope(next: 'playlists' | 'songs'): void {
@@ -283,7 +297,8 @@ function setScope(next: 'playlists' | 'songs'): void {
     btn.classList.toggle('active', (btn as HTMLElement).dataset.scope === scope);
   }
   refreshLibraryLists();
-  void maybeSearchSongs();
+  const input = document.getElementById('library-search') as HTMLInputElement | null;
+  if (scope === 'songs' && input?.value.trim()) void maybeSearchSongs({ fresh: true });
 }
 
 function refreshLibraryLists(): void {
@@ -307,31 +322,82 @@ function refreshLibraryLists(): void {
       );
       return;
     }
-    const filtered = query ? list.filter((p) => p.name.toLowerCase().includes(query)) : list;
-    const grid = el('div', { class: 'playlist-grid' }, ...filtered.map((p) => playlistCard(p)));
-    const children: Node[] = [grid];
-    if (!filtered.length) {
-      children.push(el('div', { class: 'empty-state' }, el('h3', {}, 'No playlist matches that filter')));
+    const filtered = query ? list.filter((p) => (p.name ?? '').toLowerCase().includes(query)) : list;
+    if (filtered.length) {
+      results.replaceChildren(el('div', { class: 'playlist-grid' }, ...filtered.map((p) => playlistCard(p))));
+      return;
     }
-    results.replaceChildren(...children);
-  } else {
-    if (count) count.textContent = 'Search songs across all of Spotify';
-    if (!songResults.length) {
-      results.replaceChildren(
-        el(
-          'div',
-          { class: 'empty-state' },
-          el('h3', {}, 'Search for a song to sing'),
-          el('p', {}, 'Type a song name and press enter — results stream straight from Spotify.'),
-        ),
-      );
-    } else {
-      results.replaceChildren(trackList(songResults, 'loose'));
-    }
+    results.replaceChildren(
+      el(
+        'div',
+        { class: 'empty-state' },
+        el('h3', {}, 'No playlist matches that filter'),
+        el('button', {
+          class: 'btn btn-primary',
+          onclick: () => { setScope('songs'); void maybeSearchSongs({ fresh: true }); },
+        }, `Search songs for “${search.trim()}”`),
+      ),
+    );
+    return;
   }
+
+  if (count) {
+    count.textContent = searching
+      ? 'Searching Spotify…'
+      : songResults.length
+        ? `${songResults.length} of ${songTotal} songs`
+        : 'Search songs across all of Spotify';
+  }
+
+  if (searching && !songResults.length) {
+    results.replaceChildren(
+      el('div', { class: 'empty-state' }, el('h3', {}, 'Searching…'), el('p', {}, 'Spotify is matching your search.')),
+    );
+    return;
+  }
+
+  if (!songResults.length) {
+    const typed = search.trim();
+    results.replaceChildren(
+      el(
+        'div',
+        { class: 'empty-state' },
+        el('h3', {}, typed ? `No songs found for “${typed}”` : 'Search for a song to sing'),
+        el('p', {}, typed
+          ? 'Try a different spelling, another song title, or the artist’s name.'
+          : 'Results appear as you type — no need to press Enter.'),
+      ),
+    );
+    return;
+  }
+
+  const children: Node[] = [trackList(songResults, 'loose')];
+  if (songResults.length < songTotal) {
+    children.push(
+      el(
+        'div',
+        { class: 'cta-row' },
+        el('button', {
+          class: 'btn',
+          onclick: (e) => {
+            (e.currentTarget as HTMLButtonElement).disabled = true;
+            void maybeSearchSongs({ append: true });
+          },
+        }, 'Load more results'),
+      ),
+    );
+  }
+  results.replaceChildren(...children);
 }
 
 function playlistCard(playlist: Playlist): HTMLElement {
+  const count = playlistSongCount(playlist);
+  // Spotify hides items for followed playlists, so fall back to the owner.
+  const meta = count != null
+    ? `${count} songs`
+    : playlist.owner?.display_name
+      ? `Playlist by ${playlist.owner.display_name}`
+      : 'Playlist';
   return el(
     'button',
     {
@@ -343,28 +409,44 @@ function playlistCard(playlist: Playlist): HTMLElement {
       'div',
       { class: 'playlist-card-body' },
       el('h3', {}, playlist.name),
-      el('div', { class: 'meta' }, `${playlist.tracks.total} songs`),
+      el('div', { class: 'meta' }, meta),
     ),
   );
 }
 
-async function maybeSearchSongs(): Promise<void> {
+async function maybeSearchSongs(opts?: { fresh?: boolean; append?: boolean }): Promise<void> {
   const input = document.getElementById('library-search') as HTMLInputElement | null;
   if (!input || scope !== 'songs') return;
   const query = input.value.trim();
   if (!query) {
     songResults = [];
+    songTotal = 0;
+    searching = false;
+    lastQuery = '';
     refreshLibraryLists();
     return;
   }
-  if (query === lastQuery) return;
+  const append = Boolean(opts?.append);
+  if (!append && !opts?.fresh && query === lastQuery && songResults.length) return;
   lastQuery = query;
+  const seq = ++searchSeq;
+  if (!append) {
+    songResults = [];
+    songTotal = 0;
+  }
+  searching = true;
+  refreshLibraryLists();
   try {
-    const results = await searchTracks(query);
-    if (query !== input.value.trim()) return; // stale response
-    songResults = results;
+    const result = await searchTracks(query, append ? songResults.length : 0);
+    if (seq !== searchSeq) return; // a newer keystroke superseded this search
+    songResults = append ? [...songResults, ...result.tracks] : result.tracks;
+    songTotal = result.total;
+    searching = false;
     refreshLibraryLists();
   } catch (err) {
+    if (seq !== searchSeq) return;
+    searching = false;
+    refreshLibraryLists();
     toast(err instanceof Error ? err.message : 'Song search failed.', 'error');
   }
 }
@@ -377,10 +459,19 @@ export async function goTracks(playlistId: string): Promise<void> {
   leaveRoomIfActive();
   renderTracksScreen(null, []);
   try {
-    const [detail, tracks] = await Promise.all([getPlaylistDetail(playlistId), getPlaylistTracks(playlistId)]);
+    // Fetch sequentially: the detail request always succeeds, while the items
+    // request is refused for playlists the user only follows.
+    const detail = await getPlaylistDetail(playlistId);
     store.playlist = detail;
-    store.playlistTracks = tracks;
-    renderTracksScreen(detail, tracks);
+    try {
+      const tracks = await getPlaylistTracks(playlistId);
+      store.playlistTracks = tracks;
+      renderTracksScreen(detail, tracks);
+    } catch (err) {
+      if (!(err instanceof PlaylistLockedError)) throw err;
+      store.playlistTracks = [];
+      renderTracksScreen(detail, [], { locked: true });
+    }
   } catch (err) {
     toast(err instanceof Error ? err.message : 'Could not load that playlist.', 'error');
     await goLibrary();
@@ -388,9 +479,19 @@ export async function goTracks(playlistId: string): Promise<void> {
 }
 
 function renderTracksScreen(
-  detail: { name: string; images: { url: string }[]; tracks: { total: number } } | null,
+  detail: PlaylistDetail | null,
   tracks: Track[],
+  opts?: { locked?: boolean },
 ): void {
+  const locked = Boolean(opts?.locked);
+  const count = detail ? playlistSongCount(detail) : null;
+  const meta = detail
+    ? count != null
+      ? `${count} songs`
+      : detail.owner?.display_name
+        ? `Playlist by ${detail.owner.display_name}`
+        : 'Playlist'
+    : '';
   const hero = el(
     'div',
     { class: 'page-hero' },
@@ -407,30 +508,77 @@ function renderTracksScreen(
               'div',
               {},
               el('h2', {}, detail.name),
-              el('p', { class: 'muted' }, `${detail.tracks.total} songs`),
+              el('p', { class: 'muted' }, meta),
+              el(
+                'div',
+                { class: 'cta-row' },
+                el('button', {
+                  class: 'btn btn-primary',
+                  onclick: () => startPlaylistRoom(detail),
+                }, 'Play from the start'),
+              ),
             ),
           )
         : el('div', { class: 'empty-state' }, el('h3', {}, 'Loading playlist…')),
     ),
   );
+
+  let body: HTMLElement | null = null;
+  if (detail) {
+    if (locked) {
+      body = el(
+        'div',
+        { class: 'empty-state' },
+        el('h3', {}, 'Spotify keeps this playlist’s songs private'),
+        el(
+          'p',
+          {},
+          'Since February 2026, Spotify only lists the songs of playlists you own or collaborate on. Followed playlists can still be played from the start — Solo picks up each song as Spotify plays it.',
+        ),
+        el('button', {
+          class: 'btn btn-primary',
+          onclick: () => startPlaylistRoom(detail),
+        }, 'Play from the start'),
+      );
+    } else if (tracks.length) {
+      body = trackList(tracks, 'playlist');
+    } else {
+      body = el(
+        'div',
+        { class: 'empty-state' },
+        el('h3', {}, 'This playlist has no playable songs'),
+        el('p', {}, 'Local files and podcast episodes cannot be played through the web player.'),
+      );
+    }
+  }
+
   const content = el(
     'main',
     { class: 'page' },
     hero,
-    el(
-      'div',
-      { class: 'container' },
-      detail ? premiumBanner() : null,
-      detail
-        ? (tracks.length
-            ? trackList(tracks, 'playlist')
-            : el('div', { class: 'empty-state' }, el('h3', {}, 'This playlist has no playable songs'), el('p', {}, 'Local files and podcast episodes cannot be played through the web player.')))
-        : null,
-    ),
+    el('div', { class: 'container' }, detail ? premiumBanner() : null, body),
   );
   shell(content);
 
   if (detail) void applyHeaderTint(hero, detail.images);
+}
+
+/** Start a playlist at its first song without knowing its track list up front. */
+function startPlaylistRoom(detail: PlaylistDetail): void {
+  // `product` is no longer returned by GET /me, so only block on a known free plan.
+  if (store.me?.product && store.me.product !== 'premium') {
+    toast('Spotify Premium is required for in-browser playback. Connect a Premium account to sing.', 'error');
+    return;
+  }
+  store.player?.activate();
+  renderRoom(
+    {
+      kind: 'playlist',
+      playlistUri: detail.uri,
+      playlistName: detail.name,
+    },
+    () => void goLibrary(),
+  );
 }
 
 /** Spotify-style gradient header tinted with the playlist artwork. */
@@ -442,7 +590,9 @@ async function applyHeaderTint(hero: HTMLElement, images: { url: string }[] | un
 
 function premiumBanner(): HTMLElement | null {
   const product = store.me?.product;
-  if (product === 'premium') return null;
+  // `product` was removed from GET /me in February 2026 — unknown means we
+  // can't tell, so don't nag; playback will report any account limitation.
+  if (!product || product === 'premium') return null;
   return el(
     'div',
     { class: 'banner banner-warn' },
@@ -491,7 +641,7 @@ async function startDuet(
   button: HTMLButtonElement,
   allTracks?: Track[],
 ): Promise<void> {
-  if (store.me && store.me.product !== 'premium') {
+  if (store.me?.product && store.me.product !== 'premium') {
     toast('Spotify Premium is required for in-browser playback. Connect a Premium account to sing.', 'error');
     return;
   }

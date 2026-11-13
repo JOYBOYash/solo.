@@ -15,6 +15,18 @@ export class ApiError extends Error {
   }
 }
 
+/**
+ * Thrown when Spotify refuses to list a playlist's contents. Since the
+ * February 2026 Web API changes, only playlists the user owns or collaborates
+ * on expose their items.
+ */
+export class PlaylistLockedError extends Error {
+  constructor() {
+    super('Spotify only shares the songs of playlists you own or collaborate on.');
+    this.name = 'PlaylistLockedError';
+  }
+}
+
 async function request<T>(path: string, init?: RequestInit, retry = true): Promise<T> {
   if (!isLoggedIn()) throw new ApiError('Not connected to Spotify.', 401);
   const token = await ensureToken();
@@ -47,17 +59,29 @@ async function request<T>(path: string, init?: RequestInit, retry = true): Promi
 export interface Me {
   id: string;
   display_name: string | null;
-  product: string;
+  /** Removed from GET /me in the February 2026 API changes; may be absent. */
+  product?: string;
   images: { url: string }[];
 }
 
-export interface Playlist {
+interface SongCounts {
+  /** Current API shape — absent for playlists the user does not own. */
+  items?: { total: number };
+  /** Deprecated pre-February-2026 alias for `items`. */
+  tracks?: { total: number };
+}
+
+export interface Playlist extends SongCounts {
   id: string;
   uri: string;
   name: string;
   images: { url: string }[];
-  tracks: { total: number };
-  owner: { display_name: string | null };
+  owner: { id?: string; display_name: string | null };
+}
+
+/** Song count when Spotify exposes it — null for merely-followed playlists. */
+export function playlistSongCount(playlist: SongCounts): number | null {
+  return playlist.items?.total ?? playlist.tracks?.total ?? null;
 }
 
 export interface Track {
@@ -95,26 +119,39 @@ export async function getPlaylists(): Promise<Playlist[]> {
   return out;
 }
 
-export interface PlaylistDetail {
+export interface PlaylistDetail extends SongCounts {
   id: string;
   uri: string;
   name: string;
   images: { url: string }[];
-  tracks: { total: number };
+  owner?: { id?: string; display_name: string | null };
 }
 
 export async function getPlaylistDetail(id: string): Promise<PlaylistDetail> {
-  return request<PlaylistDetail>(`/playlists/${id}?fields=id,uri,name,images,tracks(total)`);
+  return request<PlaylistDetail>(
+    `/playlists/${id}?fields=id,uri,name,images,owner(id,display_name),items(total)`,
+  );
 }
 
-/** All playable tracks of a playlist, following pagination. */
+/**
+ * All playable tracks of a playlist, following pagination. Uses the /items
+ * endpoint introduced in February 2026; the old /tracks endpoint was removed.
+ */
 export async function getPlaylistTracks(id: string): Promise<Track[]> {
   const out: Track[] = [];
-  let path = `/playlists/${id}/tracks?limit=50`;
+  let path = `/playlists/${id}/items?limit=50`;
   for (let page = 0; page < 40 && path; page++) {
-    const res = await request<Paged<{ track: Track | null }>>(path);
-    for (const item of res.items) {
-      const t = item.track;
+    let res: Paged<{ item?: Track | null; track?: Track | null }>;
+    try {
+      res = await request(path);
+    } catch (err) {
+      if (err instanceof ApiError && (err.status === 403 || err.status === 404)) {
+        throw new PlaylistLockedError();
+      }
+      throw err;
+    }
+    for (const entry of res.items) {
+      const t = entry?.item ?? entry?.track;
       if (t && t.uri && t.uri.startsWith('spotify:track:')) out.push(t);
     }
     path = res.next ? `${res.next.replace(API, '')}` : '';
@@ -122,12 +159,23 @@ export async function getPlaylistTracks(id: string): Promise<Track[]> {
   return out;
 }
 
-export async function searchTracks(query: string): Promise<Track[]> {
-  if (!query.trim()) return [];
+export interface SearchResults {
+  tracks: Track[];
+  total: number;
+}
+
+export async function searchTracks(query: string, offset = 0): Promise<SearchResults> {
+  const q = query.trim();
+  if (!q) return { tracks: [], total: 0 };
+  // The search limit maximum dropped from 50 to 10 in February 2026, so a
+  // page of results is 10 songs; offset paginates beyond that.
   const res = await request<{ tracks: Paged<Track> }>(
-    `/search?type=track&limit=24&q=${encodeURIComponent(query.trim())}`,
+    `/search?type=track&limit=10&offset=${offset}&q=${encodeURIComponent(q)}`,
   );
-  return res.tracks.items.filter((t) => t.uri);
+  return {
+    tracks: res.tracks.items.filter((t) => t?.uri),
+    total: res.tracks.total,
+  };
 }
 
 /** Start playback of a playlist (optionally at a given track) on the given device. */
