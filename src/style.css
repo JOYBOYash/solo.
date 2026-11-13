@@ -543,11 +543,18 @@ code {
 
 .playlist-grid {
   display: grid;
-  grid-template-columns: repeat(4, 1fr);
-  gap: 20px;
+  /* minmax(0, 1fr) stops long titles or oversized artwork from widening one
+     column and squeezing the rest. Every card gets the same track width. */
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 18px;
+  align-items: start;
 }
 
 .playlist-card {
+  display: flex;
+  flex-direction: column;
+  width: 100%;
+  min-width: 0;
   text-align: left;
   background: var(--surface);
   border: none;
@@ -587,6 +594,7 @@ code {
 
 .playlist-card-body {
   padding-top: 12px;
+  min-width: 0;
 }
 
 .playlist-card-body h3 {
@@ -597,6 +605,7 @@ code {
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
+  max-width: 100%;
 }
 
 .playlist-card-body .meta {
@@ -1284,7 +1293,7 @@ code {
 
 @media (max-width: 1024px) {
   .playlist-grid {
-    grid-template-columns: repeat(3, 1fr);
+    grid-template-columns: repeat(3, minmax(0, 1fr));
   }
 }
 
@@ -1305,7 +1314,7 @@ code {
   }
 
   .playlist-grid {
-    grid-template-columns: repeat(2, 1fr);
+    grid-template-columns: repeat(2, minmax(0, 1fr));
     gap: 14px;
   }
 

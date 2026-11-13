@@ -550,7 +550,7 @@ function playlistCard(playlist: Playlist): HTMLElement {
     el(
       'div',
       { class: 'playlist-card-body' },
-      el('h3', {}, playlist.name),
+      el('h3', { title: playlist.name }, playlist.name),
       el('div', { class: 'meta' }, meta),
     ),
   );
