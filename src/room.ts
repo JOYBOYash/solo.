@@ -52,11 +52,14 @@ let micAvailable = false;
    ------------------------------------------------------------ */
 
 export function renderRoom(context: RoomContext, exitHandler: () => void): void {
+  // If a room was somehow already open, tear it down first.
+  if (refs) closeRoom();
   ctx = context;
   onExit = exitHandler;
   store.roomActive = true;
   playback = null;
   lyrics = null;
+  lyricsToken++;
   currentTrackUri = '';
   attributions = new Map();
   counts = { you: 0, artist: 0 };
@@ -72,10 +75,14 @@ export function closeRoom(): void {
   store.roomActive = false;
   cancelAnimationFrame(raf);
   raf = 0;
+  lyricsToken++;
   store.duet?.stop();
   store.mic?.stop();
+  // Leaving the room should not keep music playing in the background.
+  void store.player?.pause();
   document.removeEventListener('keydown', onKeyDown);
   document.removeEventListener('keyup', onKeyUp);
+  window.removeEventListener('blur', onBlur);
   ctx = null;
   onExit = null;
   refs = null;
@@ -139,7 +146,7 @@ function buildDom(context: RoomContext): RoomRefs {
         el('span', { class: 'status-chip' }, statusDot, statusText),
       ),
       lyricsPanel,
-      el('div', { class: 'meter-row' }, el('span', { class: 'meter-label' }, 'Mic'), meterFill, pitch),
+      el('div', { class: 'meter-row' }, el('span', { class: 'meter-label' }, 'Mic'), el('div', { class: 'meter' }, meterFill), pitch),
       el(
         'div',
         { class: 'progress-row' },
@@ -207,6 +214,7 @@ function buildDom(context: RoomContext): RoomRefs {
 
   document.addEventListener('keydown', onKeyDown);
   document.addEventListener('keyup', onKeyUp);
+  window.addEventListener('blur', onBlur);
 
   setMode(store.prefs.mode);
   if (context.initialTrack) {
@@ -248,6 +256,7 @@ async function init(r: RoomRefs): Promise<void> {
     // works even if the microphone is unavailable.
     const mic = store.mic ?? (store.mic = new MicMonitor());
     mic.onState = (state) => {
+      if (!store.roomActive || refs !== r) return;
       r.meterFill.style.width = `${Math.round(state.level * 100)}%`;
       r.pitch.textContent =
         state.voiced && state.pitchHz ? describePitch(state.pitchHz) : '—';
@@ -255,14 +264,25 @@ async function init(r: RoomRefs): Promise<void> {
     };
     try {
       await mic.start();
+      if (!store.roomActive || refs !== r) {
+        // The room was closed while the permission prompt was open. If no newer
+        // room is using this shared monitor, release the microphone; otherwise
+        // the new room owns it.
+        if (!store.roomActive) mic.stop();
+        return;
+      }
       mic.sensitivity = store.prefs.sensitivity;
       micAvailable = true;
     } catch {
+      if (!store.roomActive || refs !== r) return;
       micAvailable = false;
       toast('Microphone unavailable — switch to Manual mode and hold the lead button while you sing.', 'error');
       setMode('manual');
       r.segAuto.disabled = true;
     }
+
+    // Refresh the note now that we know whether the mic actually started.
+    setMode(store.prefs.mode);
 
     const player = store.player ?? (store.player = new PlayerBridge());
     player.onState = (state) => handlePlayerState(state);
@@ -270,12 +290,14 @@ async function init(r: RoomRefs): Promise<void> {
 
     setStatus('connecting', 'Connecting playback…');
     const deviceId = await player.connect();
+    if (!store.roomActive || refs !== r) return;
 
     const duet = store.duet ?? (store.duet = new DuetEngine());
     duet.setBaseVolume(store.prefs.baseVolume);
     duet.setBackingFactor(store.prefs.backingFactor);
     duet.setMode(store.prefs.mode);
     duet.onLead = () => {
+      if (!store.roomActive || refs !== r) return;
       updateStatus();
       r.holdBtn.setAttribute('aria-pressed', duet.lead === 'you' ? 'true' : 'false');
     };
@@ -284,7 +306,13 @@ async function init(r: RoomRefs): Promise<void> {
     raf = requestAnimationFrame(tick);
 
     await startPlayback(deviceId);
+
+    // The user may have left while the start request was in flight. Do not let
+    // that request leave music playing after the room is gone (but never pause
+    // a newer room that has taken over the shared player).
+    if (!store.roomActive) await player.pause();
   } catch (err) {
+    if (!store.roomActive || refs !== r) return;
     const message = err instanceof Error ? err.message : 'Playback could not start.';
     setStatus('paused', 'Playback unavailable');
     toast(message, 'error');
@@ -320,8 +348,9 @@ async function startPlayback(deviceId: string): Promise<void> {
 }
 
 function exit(): void {
+  const done = onExit;
   closeRoom();
-  onExit?.();
+  done?.();
 }
 
 /* ------------------------------------------------------------
@@ -371,7 +400,7 @@ function handleSdkError(error: { kind: string; message: string }): void {
    Track + lyrics rendering
    ------------------------------------------------------------ */
 
-function renderTrackBasics(track: { name: string; artists: { name: string }[]; album: { images: { url: string }[] } }): void {
+function renderTrackBasics(track: { name: string; artists: { name: string }[]; album?: { images: { url: string }[] } }): void {
   if (!refs) return;
   refs.trackArt.replaceChildren(
     artwork(track.album?.images, '', `Artwork for ${track.name}`),
@@ -580,7 +609,17 @@ function setMode(mode: 'auto' | 'manual'): void {
 function onKeyDown(e: KeyboardEvent): void {
   if (e.code !== 'Space' || !store.roomActive) return;
   const target = e.target as HTMLElement | null;
-  if (target && (target.tagName === 'INPUT' || target.tagName === 'TEXTAREA' || target.tagName === 'BUTTON')) return;
+  // Typing and sliders keep the space key; everywhere else in the room it is
+  // the manual "take the lead" control (including when a button has focus).
+  if (
+    target &&
+    (target.isContentEditable ||
+      target.tagName === 'INPUT' ||
+      target.tagName === 'TEXTAREA' ||
+      target.tagName === 'SELECT')
+  ) {
+    return;
+  }
   e.preventDefault();
   if (!e.repeat) setHeld(true);
 }
@@ -588,4 +627,9 @@ function onKeyDown(e: KeyboardEvent): void {
 function onKeyUp(e: KeyboardEvent): void {
   if (e.code !== 'Space' || !store.roomActive) return;
   setHeld(false);
+}
+
+/** Releasing focus (tab switch, notification) must not leave the artist ducked. */
+function onBlur(): void {
+  if (store.roomActive) setHeld(false);
 }

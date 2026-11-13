@@ -57,25 +57,34 @@ export class MicMonitor {
 
   async start(): Promise<void> {
     if (this.ctx) return;
-    this.stream = await navigator.mediaDevices.getUserMedia({
-      audio: {
-        echoCancellation: true,
-        noiseSuppression: true,
-        autoGainControl: true,
-      },
-    });
-    const ctx = new AudioContext();
-    this.ctx = ctx;
-    const source = ctx.createMediaStreamSource(this.stream);
-    const analyser = ctx.createAnalyser();
-    analyser.fftSize = 2048;
-    analyser.smoothingTimeConstant = 0.6;
-    source.connect(analyser);
-    this.analyser = analyser;
-    this.timeBuf = new Float32Array(analyser.fftSize);
-    this.freqBuf = new Uint8Array(analyser.frequencyBinCount);
-    await ctx.resume();
-    this.loop();
+    let stream: MediaStream | null = null;
+    try {
+      stream = await navigator.mediaDevices.getUserMedia({
+        audio: {
+          echoCancellation: true,
+          noiseSuppression: true,
+          autoGainControl: true,
+        },
+      });
+      const ctx = new AudioContext();
+      this.ctx = ctx;
+      this.stream = stream;
+      const source = ctx.createMediaStreamSource(stream);
+      const analyser = ctx.createAnalyser();
+      analyser.fftSize = 2048;
+      analyser.smoothingTimeConstant = 0.6;
+      source.connect(analyser);
+      this.analyser = analyser;
+      this.timeBuf = new Float32Array(analyser.fftSize);
+      this.freqBuf = new Uint8Array(analyser.frequencyBinCount);
+      await ctx.resume();
+      this.loop();
+    } catch (err) {
+      // Never leave a microphone track recording after a failed start.
+      stream?.getTracks().forEach((t) => t.stop());
+      this.stop();
+      throw err;
+    }
   }
 
   stop(): void {

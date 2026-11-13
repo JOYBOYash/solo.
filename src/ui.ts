@@ -1,6 +1,13 @@
 // Shell, connect screen, library (playlists + song search) and playlist view.
 
-import { getClientId, redirectUri, setClientId } from './lib/config';
+import {
+  getClientId,
+  clearClientId,
+  hasDeploymentClientId,
+  hasLocalClientIdOverride,
+  redirectUri,
+  setClientId,
+} from './lib/config';
 import { login, logout, isLoggedIn } from './lib/auth';
 import {
   getPlaylists,
@@ -9,6 +16,7 @@ import {
   searchTracks,
   playlistSongCount,
   PlaylistLockedError,
+  ApiError,
   type Playlist,
   type PlaylistDetail,
   type Track,
@@ -17,6 +25,7 @@ import { formatMs } from './lib/clean';
 import { el, artwork, avatar, toast, dominantTint } from './dom';
 import { store, type RoomContext } from './store';
 import { renderRoom, closeRoom } from './room';
+import { PlayerBridge } from './lib/sdk';
 
 const app = document.getElementById('app') as HTMLElement;
 
@@ -56,6 +65,9 @@ function shell(content: HTMLElement): void {
             ? el('button', {
                 class: 'btn btn-small',
                 onclick: () => {
+                  // Release the Spotify Connect device before dropping the token.
+                  store.player?.disconnect();
+                  store.player = null;
                   logout();
                   location.reload();
                 },
@@ -81,9 +93,10 @@ function shell(content: HTMLElement): void {
 /* ------------------------------------------------------------
    Connect screen
    ------------------------------------------------------------ */
-export function renderConnectScreen(error?: string): void {
+export function renderConnectScreen(error?: string, forceSetup = false): void {
   document.body.style.background = '';
-  const clientId = getClientId();
+  const clientId = forceSetup ? null : getClientId();
+  const deploymentId = hasDeploymentClientId();
 
   const content = el(
     'main',
@@ -99,6 +112,13 @@ export function renderConnectScreen(error?: string): void {
       ),
       error ? el('p', { class: 'form-error' }, error) : null,
       el('div', { class: 'cta-row', id: 'cta' }, clientId ? null : setupCard()),
+      forceSetup && deploymentId
+        ? el(
+            'div',
+            { class: 'cta-row' },
+            el('button', { class: 'btn', onclick: () => renderConnectScreen() }, 'Use the deployment’s Spotify app'),
+          )
+        : null,
       clientId
         ? el(
             'div',
@@ -118,8 +138,19 @@ export function renderConnectScreen(error?: string): void {
                 }
               },
             }, 'Connect Spotify'),
-            el('button', { class: 'btn', onclick: () => renderConnectScreen() }, 'Change Client ID'),
+            el('button', {
+              class: 'btn',
+              onclick: () => {
+                clearClientId();
+                // When the deployment has its own app, offer the override form
+                // explicitly; otherwise clearing the local ID already shows it.
+                renderConnectScreen(undefined, deploymentId);
+              },
+            }, 'Change Client ID'),
           )
+        : null,
+      clientId && deploymentId && !hasLocalClientIdOverride()
+        ? el('p', { class: 'muted', style: 'margin-top:12px' }, 'This deployment is preconfigured with its own Spotify app.')
         : null,
       el(
         'ul',
@@ -132,7 +163,7 @@ export function renderConnectScreen(error?: string): void {
         'div',
         { class: 'note-card' },
         el('p', {}, 'Wear headphones for the most reliable duet — Solo separates your voice from the song using echo cancellation. On speakers, switch the room to Manual mode and hold the lead button (or the space bar) while you sing.'),
-        el('p', {}, 'Spotify in-browser playback requires a Premium subscription. Your account is checked automatically when you connect.'),
+        el('p', {}, 'Spotify in-browser playback requires a Premium subscription. Solo tells you if Spotify refuses playback for the connected account.'),
       ),
     ),
   );
@@ -185,6 +216,9 @@ function setupCard(): HTMLElement {
       {},
       'Solo uses your own Spotify app, so every singer connects with their own Client ID — no approval queue, and it works on any host. Setup takes about two minutes.',
     ),
+    hasDeploymentClientId()
+      ? el('p', { class: 'muted' }, 'This deployment already has a default Client ID. Saving one here overrides it in this browser only.')
+      : null,
     el(
       'ol',
       { class: 'setup-ol' },
@@ -222,13 +256,48 @@ function setupCard(): HTMLElement {
 
 export async function goLibrary(): Promise<void> {
   leaveRoomIfActive();
+  tracksSeq++;
+  prewarmPlayer();
+  resetLibraryState();
+  playlistsError = '';
+  playlistsLoading = !store.playlists.length;
   renderLibraryScreen();
-
-  try {
-    if (!store.playlists.length) store.playlists = await getPlaylists();
+  if (store.playlists.length) {
     refreshLibraryLists();
+    return;
+  }
+  await fetchPlaylists();
+}
+
+/** Start the Playback SDK early so entering a room is fast and iOS has a player to unlock. */
+function prewarmPlayer(): void {
+  if (store.player) return;
+  const player = new PlayerBridge();
+  store.player = player;
+  void player.connect().catch(() => {
+    // The room reports a useful error if the retry also fails.
+  });
+}
+
+async function fetchPlaylists(): Promise<void> {
+  const seq = ++playlistsSeq;
+  playlistsLoading = true;
+  refreshLibraryLists();
+  try {
+    const list = await getPlaylists();
+    if (seq !== playlistsSeq) return;
+    store.playlists = list;
+    playlistsError = '';
   } catch (err) {
-    toast(err instanceof Error ? err.message : 'Could not load your playlists.', 'error');
+    if (seq !== playlistsSeq) return;
+    if (handleSessionError(err)) return;
+    playlistsError = err instanceof Error ? err.message : 'Could not load your playlists.';
+    toast(playlistsError, 'error');
+  } finally {
+    if (seq === playlistsSeq) {
+      playlistsLoading = false;
+      refreshLibraryLists();
+    }
   }
 }
 
@@ -246,7 +315,17 @@ export function renderLibraryScreen(): void {
           'div',
           { class: 'page-head' },
           el('h2', {}, 'Your playlists'),
-          el('span', { class: 'muted', id: 'library-count' }, 'Loading playlists…'),
+          el(
+            'div',
+            { class: 'page-head-actions' },
+            el('span', { class: 'muted', id: 'library-count' }, 'Loading playlists…'),
+            el('button', {
+              class: 'btn btn-small',
+              id: 'library-refresh',
+              disabled: playlistsLoading,
+              onclick: () => void fetchPlaylists(),
+            }, 'Refresh'),
+          ),
         ),
         el(
           'div',
@@ -256,7 +335,6 @@ export function renderLibraryScreen(): void {
             id: 'library-search',
             type: 'search',
             placeholder: 'Filter playlists, or search songs to sing',
-            oninput: () => refreshLibraryLists(),
           }),
           el(
             'div',
@@ -278,7 +356,11 @@ export function renderLibraryScreen(): void {
     refreshLibraryLists();
     // Songs stream in as you type; playlists filter instantly.
     if (scope === 'songs') {
-      debounce = window.setTimeout(() => void maybeSearchSongs({ fresh: true }), 300);
+      if (!search.value.trim()) {
+        void maybeSearchSongs();
+      } else {
+        debounce = window.setTimeout(() => void maybeSearchSongs({ fresh: true }), 300);
+      }
     }
   });
   refreshLibraryLists();
@@ -290,9 +372,43 @@ let songTotal = 0;
 let searching = false;
 let searchSeq = 0;
 let lastQuery = '';
+let playlistsLoading = false;
+let playlistsError = '';
+let playlistsSeq = 0;
+let tracksSeq = 0;
+
+/** A dead Spotify session drops back to the connect screen instead of looping errors. */
+function handleSessionError(err: unknown): boolean {
+  if (!(err instanceof ApiError) || err.status !== 401) return false;
+  playlistsSeq++;
+  tracksSeq++;
+  searchSeq++;
+  store.player?.disconnect();
+  store.player = null;
+  store.me = null;
+  store.playlists = [];
+  store.playlist = null;
+  store.playlistTracks = [];
+  logout();
+  renderConnectScreen('Your Spotify session has ended. Please connect again.');
+  return true;
+}
+
+function resetLibraryState(): void {
+  scope = 'playlists';
+  songResults = [];
+  songTotal = 0;
+  searching = false;
+  searchSeq++;
+  lastQuery = '';
+}
 
 function setScope(next: 'playlists' | 'songs'): void {
-  scope = next;
+  if (scope !== next) {
+    scope = next;
+    searchSeq++;
+    searching = false;
+  }
   for (const btn of document.querySelectorAll('.seg-btn')) {
     btn.classList.toggle('active', (btn as HTMLElement).dataset.scope === scope);
   }
@@ -305,24 +421,49 @@ function refreshLibraryLists(): void {
   const results = document.getElementById('library-results');
   const count = document.getElementById('library-count');
   if (!results) return;
+  const refreshBtn = document.getElementById('library-refresh') as HTMLButtonElement | null;
+  if (refreshBtn) refreshBtn.disabled = playlistsLoading;
   const search = (document.getElementById('library-search') as HTMLInputElement | null)?.value ?? '';
   const query = search.trim().toLowerCase();
 
   if (scope === 'playlists') {
     const list = store.playlists;
-    if (count) count.textContent = list.length ? `${list.length} playlists` : '';
     if (!list.length) {
-      results.replaceChildren(
-        el(
-          'div',
-          { class: 'empty-state' },
-          el('h3', {}, 'No playlists to sing with yet'),
-          el('p', {}, 'Create a playlist in Spotify (or follow one), then come back — it will appear here.'),
-        ),
-      );
+      if (count) count.textContent = playlistsLoading ? 'Loading playlists…' : '';
+      if (playlistsLoading) {
+        results.replaceChildren(
+          el('div', { class: 'empty-state' }, el('h3', {}, 'Loading your playlists…'), el('p', {}, 'Fetching real playlists from Spotify.')),
+        );
+      } else if (playlistsError) {
+        results.replaceChildren(
+          el(
+            'div',
+            { class: 'empty-state' },
+            el('h3', {}, 'Could not load your playlists'),
+            el('p', {}, playlistsError),
+            el('button', { class: 'btn btn-primary', onclick: () => void fetchPlaylists() }, 'Try again'),
+          ),
+        );
+      } else {
+        results.replaceChildren(
+          el(
+            'div',
+            { class: 'empty-state' },
+            el('h3', {}, 'No playlists to sing with yet'),
+            el('p', {}, 'Create a playlist in Spotify (or follow one), then press Refresh — it will appear here.'),
+          ),
+        );
+      }
       return;
     }
     const filtered = query ? list.filter((p) => (p.name ?? '').toLowerCase().includes(query)) : list;
+    if (count) {
+      count.textContent = playlistsLoading
+        ? 'Refreshing playlists…'
+        : query
+          ? `${filtered.length} of ${list.length} playlists`
+          : `${list.length} playlists`;
+    }
     if (filtered.length) {
       results.replaceChildren(el('div', { class: 'playlist-grid' }, ...filtered.map((p) => playlistCard(p))));
       return;
@@ -379,11 +520,12 @@ function refreshLibraryLists(): void {
         { class: 'cta-row' },
         el('button', {
           class: 'btn',
+          disabled: searching,
           onclick: (e) => {
             (e.currentTarget as HTMLButtonElement).disabled = true;
             void maybeSearchSongs({ append: true });
           },
-        }, 'Load more results'),
+        }, searching ? 'Loading more…' : 'Load more results'),
       ),
     );
   }
@@ -419,6 +561,7 @@ async function maybeSearchSongs(opts?: { fresh?: boolean; append?: boolean }): P
   if (!input || scope !== 'songs') return;
   const query = input.value.trim();
   if (!query) {
+    searchSeq++;
     songResults = [];
     songTotal = 0;
     searching = false;
@@ -439,13 +582,20 @@ async function maybeSearchSongs(opts?: { fresh?: boolean; append?: boolean }): P
   try {
     const result = await searchTracks(query, append ? songResults.length : 0);
     if (seq !== searchSeq) return; // a newer keystroke superseded this search
+    const current = (document.getElementById('library-search') as HTMLInputElement | null)?.value.trim() ?? '';
+    if (scope !== 'songs' || current !== query) {
+      searching = false;
+      return;
+    }
     songResults = append ? [...songResults, ...result.tracks] : result.tracks;
     songTotal = result.total;
     searching = false;
     refreshLibraryLists();
   } catch (err) {
     if (seq !== searchSeq) return;
+    if (handleSessionError(err)) return;
     searching = false;
+    lastQuery = '';
     refreshLibraryLists();
     toast(err instanceof Error ? err.message : 'Song search failed.', 'error');
   }
@@ -457,14 +607,17 @@ async function maybeSearchSongs(opts?: { fresh?: boolean; append?: boolean }): P
 
 export async function goTracks(playlistId: string): Promise<void> {
   leaveRoomIfActive();
+  const seq = ++tracksSeq;
   renderTracksScreen(null, []);
   try {
     // Fetch sequentially: the detail request always succeeds, while the items
     // request is refused for playlists the user only follows.
     const detail = await getPlaylistDetail(playlistId);
+    if (seq !== tracksSeq) return;
     store.playlist = detail;
     try {
       const tracks = await getPlaylistTracks(playlistId);
+      if (seq !== tracksSeq) return;
       store.playlistTracks = tracks;
       // A followed playlist may answer with an empty page instead of a 403.
       // An owned empty playlist reports total 0, so only treat a non-zero or
@@ -472,11 +625,14 @@ export async function goTracks(playlistId: string): Promise<void> {
       const count = playlistSongCount(detail);
       renderTracksScreen(detail, tracks, { locked: tracks.length === 0 && count !== 0 });
     } catch (err) {
+      if (seq !== tracksSeq) return;
       if (!(err instanceof PlaylistLockedError)) throw err;
       store.playlistTracks = [];
       renderTracksScreen(detail, [], { locked: true });
     }
   } catch (err) {
+    if (seq !== tracksSeq) return;
+    if (handleSessionError(err)) return;
     toast(err instanceof Error ? err.message : 'Could not load that playlist.', 'error');
     await goLibrary();
   }
@@ -513,14 +669,16 @@ function renderTracksScreen(
               {},
               el('h2', {}, detail.name),
               el('p', { class: 'muted' }, meta),
-              el(
-                'div',
-                { class: 'cta-row' },
-                el('button', {
-                  class: 'btn btn-primary',
-                  onclick: () => startPlaylistRoom(detail),
-                }, 'Play from the start'),
-              ),
+              locked
+                ? null
+                : el(
+                    'div',
+                    { class: 'cta-row' },
+                    el('button', {
+                      class: 'btn btn-primary',
+                      onclick: () => startPlaylistRoom(detail),
+                    }, 'Play from the start'),
+                  ),
             ),
           )
         : el('div', { class: 'empty-state' }, el('h3', {}, 'Loading playlist…')),
@@ -574,6 +732,7 @@ function startPlaylistRoom(detail: PlaylistDetail): void {
     toast('Spotify Premium is required for in-browser playback. Connect a Premium account to sing.', 'error');
     return;
   }
+  prewarmPlayer();
   store.player?.activate();
   renderRoom(
     {
@@ -612,7 +771,7 @@ function trackList(tracks: Track[], kind: 'playlist' | 'loose'): HTMLElement {
       el(
         'div',
         { class: 'track-row' },
-        kind === 'playlist' ? el('span', { class: 'track-idx' }, String(index + 1)) : el('span', {}),
+        el('span', { class: 'track-idx' }, kind === 'playlist' ? String(index + 1) : ''),
         artwork(track.album?.images, 'track-thumb', `Artwork for ${track.name}`, '—'),
         el(
           'div',
@@ -650,6 +809,7 @@ async function startDuet(
     return;
   }
   // Synchronous user-gesture work: unlock the SDK's audio element where supported.
+  prewarmPlayer();
   store.player?.activate();
   button.disabled = true;
   button.textContent = 'Preparing…';

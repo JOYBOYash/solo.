@@ -9,6 +9,9 @@ const AUTHORIZE_URL = 'https://accounts.spotify.com/authorize';
 const PKCE_KEY = 'solo.pkce';
 const TOKENS_KEY = 'solo.tokens';
 
+let refreshInFlight: Promise<string> | null = null;
+let sessionEpoch = 0;
+
 export interface Tokens {
   accessToken: string;
   refreshToken: string | null;
@@ -58,6 +61,8 @@ function saveTokens(tokens: Tokens): void {
 }
 
 export function logout(): void {
+  sessionEpoch++;
+  refreshInFlight = null;
   localStorage.removeItem(TOKENS_KEY);
   sessionStorage.removeItem(PKCE_KEY);
 }
@@ -118,7 +123,14 @@ export async function handleCallbackIfPresent(): Promise<boolean> {
 
   const pendingRaw = sessionStorage.getItem(PKCE_KEY);
   sessionStorage.removeItem(PKCE_KEY);
-  const pending: PkcePending | null = pendingRaw ? JSON.parse(pendingRaw) : null;
+  let pending: PkcePending | null = null;
+  if (pendingRaw) {
+    try {
+      pending = JSON.parse(pendingRaw) as PkcePending;
+    } catch {
+      pending = null;
+    }
+  }
   if (!pending || pending.state !== state) {
     throw new AuthError('Sign-in could not be verified. Please try connecting again.');
   }
@@ -152,6 +164,7 @@ export async function handleCallbackIfPresent(): Promise<boolean> {
   };
 
   const previous = getTokens();
+  sessionEpoch++;
   saveTokens({
     accessToken: data.access_token,
     refreshToken: data.refresh_token ?? previous?.refreshToken ?? null,
@@ -160,45 +173,69 @@ export async function handleCallbackIfPresent(): Promise<boolean> {
   return true;
 }
 
-/** Returns a valid access token, refreshing silently when needed. */
-export async function ensureToken(): Promise<string> {
+/**
+ * Returns a valid access token, refreshing silently when needed.
+ *
+ * `force` skips the expiry check and refreshes even if the stored token still
+ * looks valid — used after Spotify rejects a token with 401. Concurrent callers
+ * share one refresh request, which matters because Spotify rotates refresh
+ * tokens.
+ */
+export async function ensureToken(force = false): Promise<string> {
   const tokens = getTokens();
-  if (tokens && Date.now() < tokens.expiresAt) return tokens.accessToken;
+  if (!force && tokens && Date.now() < tokens.expiresAt) return tokens.accessToken;
   if (!tokens?.refreshToken) {
     logout();
     throw new AuthError('Your Spotify session has ended. Please connect again.');
   }
 
-  const clientId = getClientId();
-  if (!clientId) throw new AuthError('No Spotify Client ID is configured.');
+  if (refreshInFlight) return refreshInFlight;
 
-  const body = new URLSearchParams({
-    grant_type: 'refresh_token',
-    refresh_token: tokens.refreshToken,
-    client_id: clientId,
-  });
+  const epoch = sessionEpoch;
+  const refreshToken = tokens.refreshToken;
+  refreshInFlight = (async () => {
+    const clientId = getClientId();
+    if (!clientId) throw new AuthError('No Spotify Client ID is configured.');
 
-  const res = await fetch(TOKEN_URL, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
-    body: body.toString(),
-  });
+    const body = new URLSearchParams({
+      grant_type: 'refresh_token',
+      refresh_token: refreshToken,
+      client_id: clientId,
+    });
 
-  if (!res.ok) {
-    logout();
-    throw new AuthError('Your Spotify session has expired. Please connect again.');
+    const res = await fetch(TOKEN_URL, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+      body: body.toString(),
+    });
+
+    // A logout (or a fresh sign-in) happened while this request was in flight.
+    if (epoch !== sessionEpoch) {
+      throw new AuthError('Your Spotify session changed. Please try again.');
+    }
+
+    if (!res.ok) {
+      logout();
+      throw new AuthError('Your Spotify session has expired. Please connect again.');
+    }
+
+    const data = (await res.json()) as {
+      access_token: string;
+      expires_in: number;
+      refresh_token?: string;
+    };
+
+    saveTokens({
+      accessToken: data.access_token,
+      refreshToken: data.refresh_token ?? refreshToken,
+      expiresAt: Date.now() + (data.expires_in - 60) * 1000,
+    });
+    return data.access_token;
+  })();
+
+  try {
+    return await refreshInFlight;
+  } finally {
+    refreshInFlight = null;
   }
-
-  const data = (await res.json()) as {
-    access_token: string;
-    expires_in: number;
-    refresh_token?: string;
-  };
-
-  saveTokens({
-    accessToken: data.access_token,
-    refreshToken: data.refresh_token ?? tokens.refreshToken,
-    expiresAt: Date.now() + (data.expires_in - 60) * 1000,
-  });
-  return data.access_token;
 }

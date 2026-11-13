@@ -16,10 +16,13 @@ original vocals pick the song straight back up — a duet, solo.
 ## What it actually does
 
 - **Library** — your real Spotify playlists (and Spotify-wide song search) load
-  straight into the app. No sample data. Song search runs as you type, with
-  "load more" paging. Playlist headers pick up a gradient tint from the
-  artwork, Spotify-style. Playlists you follow are playable from the start even
-  though Spotify no longer exposes their song lists (see below).
+  straight into the app. No sample data. Search runs as you type with a small
+  debounce, and pages with **Load more results**. Playlist headers pick up a
+  gradient tint from the artwork, Spotify-style.
+- **Playlists you follow** — Spotify's February 2026 API only exposes the songs
+  of playlists you own or collaborate on. Solo still shows followed playlists
+  and offers **Play from the start**; the room picks up each song from the
+  Playback SDK as Spotify plays it.
 - **Room** — a dark performance stage: the song plays through the Spotify Web
   Playback SDK, time-synced lyrics stream from LRCLIB (free, no key), your live
   mic level and detected note are metered, and the background glows with the
@@ -47,7 +50,8 @@ always sing *with* the record, and the record sings back when you rest.
 
 - **Node.js 20.19+ / 22+** (tested on Node 22)
 - A **Spotify Premium** account — the Web Playback SDK hard-requires Premium
-  for in-browser streaming. The app detects a free account and tells you.
+  for in-browser streaming. Playback reports the account limitation if it is a
+  free plan.
 - A **Spotify developer app** whose dashboard settings match the URL Solo is
   served from.
 
@@ -62,60 +66,115 @@ Open **http://127.0.0.1:5173** (it will not run from `localhost:5173` —
 Spotify only accepts loopback IP redirects, and the dev server is pinned to
 `127.0.0.1:5173` for that reason).
 
-## Host it for everyone
+No environment variables are required locally. The setup screen asks for a
+Spotify Client ID and stores it in your browser. If you want to skip that step:
 
-Solo is a fully static SPA — no server, no database. Tokens live in each
-singer's browser only. `npm run build` produces a `dist/` folder deployable
-anywhere, and the redirect URI is computed from wherever the app is served.
+```bash
+copy .env.example .env.local
+# then set VITE_SPOTIFY_CLIENT_ID=your-32-character-client-id
+```
 
-### The key thing to know: Spotify's two access models
+## Deploy on Vercel
 
-Spotify apps in **development mode** can only be used by up to **5 explicitly
-added users** (dashboard → *User Management*). That is why Solo's default
-model is:
+Solo is a fully static SPA — no server, no database, no secrets. Tokens live in
+each singer's browser only.
 
-**Bring your own Client ID (works for everyone, immediately).**
-Each singer creates their own free Spotify app (2 minutes), registers the
-redirect URI shown on Solo's setup screen, and pastes their Client ID once.
-Their Client ID is stored in their browser only. Nobody needs Spotify's
-approval, and the hosted site can be used by unlimited people.
+1. Push this repository to GitHub (already done).
+2. In Vercel, **Add New → Project** and import the repository.
+3. Vercel auto-detects Vite. Confirm:
+   - **Framework preset:** Vite
+   - **Build command:** `npm run build`
+   - **Output directory:** `dist`
+   - **Install command:** `npm ci`
+4. Add environment variables (optional — only needed if you want this deployment
+   to use **your** Spotify app rather than each visitor's own app):
 
-**Shared Client ID (optional, needs Spotify approval).**
-If you want visitors to skip setup entirely, request an **extended quota
-mode** review from Spotify for your app, then deploy with your Client ID
-pre-shared — for example by sending people the URL
-`https://your-domain/?client_id=YOUR_CLIENT_ID` (Solo stores it and strips
-it from the URL) or by adding the parameter to your landing page. Until
-Spotify grants extended quota, a shared dev Client ID still only works for
-your 5 added users.
+   | Variable | Value | Why |
+   | --- | --- | --- |
+   | `VITE_SPOTIFY_CLIENT_ID` | your 32-character Spotify Client ID | Lets visitors press **Connect Spotify** without pasting an ID. It is public and safe to expose. Development-mode apps can only serve the users you allowlist (max 5). |
+   | `VITE_SPOTIFY_REDIRECT_URI` | e.g. `https://your-domain.com/callback` | Only needed when the public URL differs from the browser's origin. Leave empty normally. |
 
-### Deploy targets (configs included)
+   Vite inlines these values at **build time**, so redeploy after changing them.
+   Never add a Client Secret — Solo uses PKCE and has no backend.
 
-| Host | How |
+   Leave `VITE_SPOTIFY_CLIENT_ID` empty for a public deployment where every
+   singer brings their own Spotify app. That is the only way to serve unlimited
+   people: Spotify extended-quota access is restricted to established
+   organizations, so a personal app can't be approved for public use.
+
+5. Deploy. Vercel gives you a production URL such as
+   `https://solo-yourname.vercel.app`.
+6. In the Spotify developer dashboard, add the redirect URI below (see the
+   exact Spotify setup next).
+
+`vercel.json` rewrites unknown paths to `index.html`, so `/callback` works as an
+SPA route.
+
+### Vercel preview deployments
+
+Spotify redirect URIs do not support wildcards. Preview URLs look like
+`https://solo-git-branch-yourname.vercel.app`, and each one must be added to the
+dashboard separately if you want to sign in there. The simplest setup is to test
+Spotify sign-in on the production domain.
+
+## Spotify developer setup (inside the dashboard)
+
+Create one Spotify app for your deployment. These are the values Solo expects:
+
+| Setting | Value |
 | --- | --- |
-| **Vercel** | Import the repo — `vercel.json` handles the SPA fallback for `/callback`. |
-| **Netlify** | Connect the repo — `netlify.toml` sets `npm run build`, publishes `dist/`, and adds the `/callback` fallback. |
-| **Firebase Hosting** | `npm i -g firebase-tools && firebase login && firebase use --add`, then `npm run build && firebase deploy` — `firebase.json` includes the rewrite. |
-| **GitHub Pages** | Push to `master` — the workflow in `.github/workflows/deploy.yml` runs `npm run build:pages` (relative base, `index.html` copied to `404.html` so `/callback` resolves) and deploys `dist/` through GitHub Actions. Pages must be enabled for the repo; the workflow asks GitHub to create the site on its first run. |
+| App name | Solo (any name is fine) |
+| APIs / SDKs | Web API + Web Playback SDK |
+| Redirect URI (production) | `https://your-vercel-domain/callback` (exact, no trailing slash) |
+| Redirect URI (local) | `http://127.0.0.1:5173/callback` |
+| Client ID | Put it in `VITE_SPOTIFY_CLIENT_ID`, or paste it into Solo's setup screen |
+| Client Secret | **Not used.** Do not put it in the frontend or in Vercel. |
+
+The app requests these scopes at sign-in:
+
+- `user-read-private` — display name and profile image
+- `playlist-read-private` — private playlists
+- `playlist-read-collaborative` — collaborative playlists
+- `user-modify-playback-state` — start/pause/seek playback
+- `streaming` — Spotify Web Playback SDK
+
+Enable the **Web Playback SDK** for the app if the dashboard presents it as a
+separate option.
+
+### Development mode vs. public use
+
+Spotify apps in **development mode** can only be used by explicitly added
+accounts (currently up to **5 users**), and the app owner must have Spotify
+Premium. In the dashboard, open **User Management** and add the email address of
+every Spotify account that will sign in, including your own.
+
+For a public deployment you have two options:
+
+**Bring your own Client ID (works immediately, no approval).**
+Leave `VITE_SPOTIFY_CLIENT_ID` empty. Each visitor creates their own Spotify
+app, adds the redirect URI shown on Solo's setup screen, and pastes their Client
+ID. It is stored in their browser only. This is Solo's default model and works
+for unlimited people.
+
+**Shared Client ID (personal / small group).**
+Set `VITE_SPOTIFY_CLIENT_ID` to your app's Client ID. Only the users in your
+User Management allowlist (max 5) can sign in. Spotify no longer grants
+extended quota to individuals — since May 2025 that review is limited to
+established organizations — so this route is for you and a few friends, not for
+a public launch. Use the bring-your-own-Client-ID model for public use.
 
 ### After deploying
 
-This repo deploys automatically from `master` to
-**https://joyboyash.github.io/solo./**; its redirect URI is
-`https://joyboyash.github.io/solo./callback`. For any other host:
-
 1. Note your live URL, e.g. `https://your-domain`.
-2. In your Spotify dashboard app settings, add the redirect URI shown on
-   Solo's setup screen — for a root deploy that is
-   `https://your-domain/callback` (for GitHub Pages it is
-   `https://user.github.io/repo/callback`). One dashboard app can hold
-   several redirect URIs, so local and production can share one app.
-3. Add the Spotify accounts you'll sing with under *User Management*.
-4. Visit the site, paste the Client ID, connect, sing.
+2. In the Spotify dashboard, add the redirect URI shown on Solo's setup screen —
+   for a root deploy that is `https://your-domain/callback`.
+   One app can hold several redirect URIs, so local and production can share it.
+3. Add the Spotify accounts you'll sing with under **User Management**.
+4. Visit the site, connect, pick a song, and sing.
 
 ## The duet mechanics
 
-1. Pick a playlist → pick a song → **Sing**.
+1. Pick a playlist → pick a song → **Sing** (or **Play from the start**).
 2. Put headphones on (recommended) and watch the mic meter.
 3. Sing. The status chip flips between **Solo is singing** and
    **Your turn — mic is live**; lyric lines are labelled as they happen.
@@ -144,14 +203,14 @@ src/
     mic.ts           microphone VAD: RMS + voice-band ratio, hold-over, pitch
     lrclib.ts        LRCLIB lyrics (synced LRC + plain), LRC parser
     clean.ts         title/artist cleanup for accurate lyrics matching
-    config.ts        Client ID storage, portable redirect URI
+    config.ts        Client ID storage, env defaults, portable redirect URI
 ```
 
 Notes on API choices: Spotify's **February 2026 Dev Mode changes** reshaped
 what a new app can read. Solo is built around the new rules:
 
 - Search returns at most **10** results per request (the old maximum was 50),
-  so song search pages with `offset` and a "Load more results" button.
+  so song search pages with `offset` and a **Load more results** button.
 - A playlist's songs now live at `GET /playlists/{id}/items` (the old
   `/tracks` endpoint was removed), and Spotify only exposes items for playlists
   the user **owns or collaborates on**. Followed playlists show their metadata
@@ -172,8 +231,10 @@ mic and the playback state instead.
 
 | Symptom | Fix |
 | --- | --- |
-| Spotify says "redirect URI invalid" | The dashboard entry must match exactly what Solo's setup screen shows (no trailing slash), e.g. `https://your-domain/callback`. |
-| Spotify says the app has no access / user not found | Add your Spotify account email under **User Management** in the dashboard. |
+| Spotify says "redirect URI invalid" | The dashboard entry must match exactly what Solo's setup screen shows (no trailing slash, correct domain, `https://`), e.g. `https://your-domain/callback`. |
+| Spotify says the app has no access / user not found | Add your Spotify account email under **User Management** in the dashboard. Development apps are limited to 5 users. |
+| Connect screen keeps asking for a Client ID | `VITE_SPOTIFY_CLIENT_ID` is empty or not a 32-character hex ID. Set it in Vercel for the correct environment and redeploy. |
+| Playlists load but a followed playlist has no songs | This is Spotify's February 2026 API rule. Use **Play from the start**; Solo will follow the playback. |
 | Room opens but no sound, "Premium required" | The connected account is a free plan. In-browser playback requires Premium. |
 | Mic meter never moves | The browser blocked the microphone — allow it for the site in the address bar, then reload and re-enter the room. |
 | App ducks constantly on speakers | Use headphones, or lower *Mic sensitivity*, or switch to Manual mode. |

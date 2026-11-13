@@ -38,7 +38,16 @@ async function request<T>(path: string, init?: RequestInit, retry = true): Promi
     },
   });
 
-  if (res.status === 401 && retry) return request<T>(path, init, false);
+  if (res.status === 401 && retry) {
+    // The token may have been revoked or expired early; force one refresh
+    // instead of reusing the same stored token.
+    try {
+      await ensureToken(true);
+    } catch {
+      throw new ApiError('Your Spotify session has ended. Please connect again.', 401);
+    }
+    return request<T>(path, init, false);
+  }
 
   if (res.status === 204) return undefined as T;
 
@@ -61,7 +70,7 @@ export interface Me {
   display_name: string | null;
   /** Removed from GET /me in the February 2026 API changes; may be absent. */
   product?: string;
-  images: { url: string }[];
+  images?: { url: string }[];
 }
 
 interface SongCounts {
@@ -75,8 +84,8 @@ export interface Playlist extends SongCounts {
   id: string;
   uri: string;
   name: string;
-  images: { url: string }[];
-  owner: { id?: string; display_name: string | null };
+  images?: { url: string }[];
+  owner?: { id?: string; display_name: string | null };
 }
 
 /** Song count when Spotify exposes it — null for merely-followed playlists. */
@@ -90,7 +99,7 @@ export interface Track {
   name: string;
   duration_ms: number;
   artists: { name: string }[];
-  album: { name: string; images: { url: string }[] };
+  album?: { name: string; images: { url: string }[] };
 }
 
 interface Paged<T> {
@@ -108,10 +117,10 @@ export async function getPlaylists(): Promise<Playlist[]> {
   const out: Playlist[] = [];
   let path = '/me/playlists?limit=50';
   for (let page = 0; page < 20 && path; page++) {
-    // This endpoint returns Playlist objects directly in `items` — unlike
-    // /playlists/{id}/tracks, which wraps each track in a `{ track }` item.
+    // This endpoint returns Playlist objects directly in `items`, each with an
+    // `items.total` song count (and a deprecated `tracks.total` alias).
     const res = await request<Paged<Playlist | null>>(path);
-    for (const item of res.items) {
+    for (const item of res.items ?? []) {
       if (item?.id) out.push(item);
     }
     path = res.next ? `${res.next.replace(API, '')}` : '';
@@ -123,14 +132,22 @@ export interface PlaylistDetail extends SongCounts {
   id: string;
   uri: string;
   name: string;
-  images: { url: string }[];
+  images?: { url: string }[];
   owner?: { id?: string; display_name: string | null };
 }
 
 export async function getPlaylistDetail(id: string): Promise<PlaylistDetail> {
-  return request<PlaylistDetail>(
-    `/playlists/${id}?fields=id,uri,name,images,owner(id,display_name),items(total)`,
-  );
+  try {
+    return await request<PlaylistDetail>(
+      `/playlists/${id}?fields=id,uri,name,images,owner(id,display_name),items(total)`,
+    );
+  } catch (err) {
+    // Older deployments / unexpected field changes: ask for the full object.
+    if (err instanceof ApiError && err.status === 400) {
+      return request<PlaylistDetail>(`/playlists/${id}`);
+    }
+    throw err;
+  }
 }
 
 /**
@@ -141,7 +158,7 @@ export async function getPlaylistTracks(id: string): Promise<Track[]> {
   const out: Track[] = [];
   let path = `/playlists/${id}/items?limit=50`;
   for (let page = 0; page < 40 && path; page++) {
-    let res: Paged<{ item?: Track | null; track?: Track | null }>;
+    let res: Paged<unknown>;
     try {
       res = await request(path);
     } catch (err) {
@@ -150,13 +167,27 @@ export async function getPlaylistTracks(id: string): Promise<Track[]> {
       }
       throw err;
     }
-    for (const entry of res.items) {
-      const t = entry?.item ?? entry?.track;
+    for (const entry of res.items ?? []) {
+      const t = unwrapPlaylistItem(entry);
       if (t && t.uri && t.uri.startsWith('spotify:track:')) out.push(t);
     }
     path = res.next ? `${res.next.replace(API, '')}` : '';
   }
   return out;
+}
+
+/**
+ * Playlist items have changed shape across Spotify API versions: an item can be
+ * the track itself, `{ item: track }` (February 2026), or `{ track }` (legacy).
+ * Accept all three so a playlist never renders empty because of a wrapper name.
+ */
+function unwrapPlaylistItem(entry: unknown): Track | null {
+  if (!entry || typeof entry !== 'object') return null;
+  const wrapped = entry as { item?: Track | null; track?: Track | null };
+  if (wrapped.item && typeof wrapped.item === 'object') return wrapped.item;
+  if (wrapped.track && typeof wrapped.track === 'object') return wrapped.track;
+  const direct = entry as Track;
+  return typeof direct.uri === 'string' ? direct : null;
 }
 
 export interface SearchResults {
@@ -172,9 +203,17 @@ export async function searchTracks(query: string, offset = 0): Promise<SearchRes
   const res = await request<{ tracks: Paged<Track> }>(
     `/search?type=track&limit=10&offset=${offset}&q=${encodeURIComponent(q)}`,
   );
+  const trackPage = res.tracks;
+  const items = trackPage?.items ?? [];
+  const reported = Number(trackPage?.total);
+  // Search offsets are capped at 1000; never offer paging past that point.
+  const total = Math.min(
+    Number.isFinite(reported) ? reported : offset + items.length,
+    1000,
+  );
   return {
-    tracks: res.tracks.items.filter((t) => t?.uri),
-    total: res.tracks.total,
+    tracks: items.filter((t) => t?.uri),
+    total,
   };
 }
 
