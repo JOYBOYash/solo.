@@ -1,0 +1,17 @@
+{
+  "name": "solo",
+  "private": true,
+  "version": "1.0.0",
+  "type": "module",
+  "description": "A solo duet player. Solo plays your Spotify playlist, listens while you sing, and carries the vocals you leave behind.",
+  "scripts": {
+    "dev": "vite",
+    "build": "tsc && vite build",
+    "build:pages": "vite build --base=./ && node -e \"require('fs').copyFileSync('dist/index.html','dist/404.html')\"",
+    "preview": "vite preview"
+  },
+  "devDependencies": {
+    "typescript": "~5.9.3",
+    "vite": "^7.1.11"
+  }
+}
