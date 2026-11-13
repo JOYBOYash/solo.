@@ -466,7 +466,11 @@ export async function goTracks(playlistId: string): Promise<void> {
     try {
       const tracks = await getPlaylistTracks(playlistId);
       store.playlistTracks = tracks;
-      renderTracksScreen(detail, tracks);
+      // A followed playlist may answer with an empty page instead of a 403.
+      // An owned empty playlist reports total 0, so only treat a non-zero or
+      // missing count as "Spotify hid the songs".
+      const count = playlistSongCount(detail);
+      renderTracksScreen(detail, tracks, { locked: tracks.length === 0 && count !== 0 });
     } catch (err) {
       if (!(err instanceof PlaylistLockedError)) throw err;
       store.playlistTracks = [];

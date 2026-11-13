@@ -100,6 +100,10 @@ your 5 added users.
 
 ### After deploying
 
+This repo deploys automatically from `master` to
+**https://joyboyash.github.io/solo./**; its redirect URI is
+`https://joyboyash.github.io/solo./callback`. For any other host:
+
 1. Note your live URL, e.g. `https://your-domain`.
 2. In your Spotify dashboard app settings, add the redirect URI shown on
    Solo's setup screen — for a root deploy that is
