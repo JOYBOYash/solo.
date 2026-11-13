@@ -23,15 +23,24 @@ export interface Prefs {
 }
 
 const PREFS_KEY = 'solo.prefs';
+/** The song drops to this fraction of the master volume while you sing. */
+const DEFAULT_BACKING_FACTOR = 0.6;
+/** The previous default was so low that the song felt muted under the voice. */
+const LEGACY_BACKING_FACTOR = 0.12;
 
 export function loadPrefs(): Prefs {
   try {
     const raw = localStorage.getItem(PREFS_KEY);
     if (raw) {
       const p = JSON.parse(raw) as Prefs;
+      const storedBacking = typeof p.backingFactor === 'number' ? p.backingFactor : null;
       return {
         baseVolume: clamp01(p.baseVolume ?? 1),
-        backingFactor: clamp01(p.backingFactor ?? 0.12),
+        // Migrate only the old default; a level the singer chose is kept.
+        backingFactor:
+          storedBacking === LEGACY_BACKING_FACTOR
+            ? DEFAULT_BACKING_FACTOR
+            : clamp01(storedBacking ?? DEFAULT_BACKING_FACTOR),
         sensitivity: Math.min(2, Math.max(0.5, p.sensitivity ?? 1)),
         mode: p.mode === 'manual' ? 'manual' : 'auto',
       };
@@ -39,7 +48,7 @@ export function loadPrefs(): Prefs {
   } catch {
     /* defaults below */
   }
-  return { baseVolume: 1, backingFactor: 0.12, sensitivity: 1, mode: 'auto' };
+  return { baseVolume: 1, backingFactor: DEFAULT_BACKING_FACTOR, sensitivity: 1, mode: 'auto' };
 }
 
 export function savePrefs(prefs: Prefs): void {

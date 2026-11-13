@@ -176,11 +176,16 @@ function buildDom(context: RoomContext): RoomRefs {
           store.prefs.baseVolume = v / 100;
           savePrefs(store.prefs);
         }),
-        sliderGroup('Artist level while you sing', Math.round(store.prefs.backingFactor * 100), (v) => {
-          store.duet?.setBackingFactor(v / 100);
-          store.prefs.backingFactor = v / 100;
-          savePrefs(store.prefs);
-        }),
+        sliderGroup(
+          'Song level while you sing',
+          Math.round(store.prefs.backingFactor * 100),
+          (v) => {
+            store.duet?.setBackingFactor(v / 100);
+            store.prefs.backingFactor = v / 100;
+            savePrefs(store.prefs);
+          },
+          'Spotify streams one mix, so the whole song — vocals included — stays at this level.',
+        ),
         sliderGroup('Mic sensitivity', Math.round(store.prefs.sensitivity * 100), (v) => {
           if (store.mic) store.mic.sensitivity = v / 100;
           store.prefs.sensitivity = v / 100;
@@ -233,7 +238,13 @@ function buildDom(context: RoomContext): RoomRefs {
   };
 }
 
-function sliderGroup(label: string, value: number, onInput: (v: number) => void): HTMLElement {
+function sliderGroup(
+  label: string,
+  value: number,
+  onInput: (v: number) => void,
+  hint?: string,
+): HTMLElement {
+  const valueText = el('span', { class: 'slider-value' }, `${value}%`);
   const input = el('input', {
     type: 'range',
     min: '0',
@@ -241,8 +252,17 @@ function sliderGroup(label: string, value: number, onInput: (v: number) => void)
     value: String(value),
     'aria-label': label,
   }) as HTMLInputElement;
-  input.addEventListener('input', () => onInput(Number(input.value)));
-  return el('div', { class: 'slider-group' }, el('label', {}, label), input);
+  input.addEventListener('input', () => {
+    valueText.textContent = `${input.value}%`;
+    onInput(Number(input.value));
+  });
+  return el(
+    'div',
+    { class: 'slider-group' },
+    el('div', { class: 'slider-label' }, el('label', {}, label), valueText),
+    input,
+    hint ? el('span', { class: 'slider-hint' }, hint) : null,
+  );
 }
 
 /* ------------------------------------------------------------
@@ -598,10 +618,10 @@ function setMode(mode: 'auto' | 'manual'): void {
   if (mode === 'auto') {
     refs.holdBtn.setAttribute('aria-pressed', 'false');
     refs.note.textContent = micAvailable
-      ? 'Auto — Solo ducks the artist whenever it hears your voice. Headphones give the cleanest detection.'
+      ? 'Auto — Solo lowers the song to your chosen level whenever it hears your voice, then brings it back when you stop. Headphones give the cleanest detection.'
       : 'Auto is unavailable without a microphone. Hold the button (or space bar) while you sing in Manual mode.';
   } else {
-    refs.note.textContent = 'Manual — hold the button (or space bar) while you sing; release to let Solo sing again.';
+    refs.note.textContent = 'Manual — hold the button (or space bar) while you sing; release and the full song comes back.';
   }
   updateStatus();
 }

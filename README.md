@@ -27,10 +27,11 @@ original vocals pick the song straight back up — a duet, solo.
   Playback SDK, time-synced lyrics stream from LRCLIB (free, no key), your live
   mic level and detected note are metered, and the background glows with the
   album art's colour.
-- **Duet engine** — while the microphone hears your voice, the artist ducks to
-  a backing level (default 12% of your master volume); when you stop, it
-  returns. Every lyric line is attributed live: "You" or "Solo", with a
-  running session tally.
+- **Duet engine** — while the microphone hears your voice, the song drops to a
+  backing level (default 60% of your master volume); when you stop, it returns
+  to full volume. The live **Song level while you sing** slider lets you keep
+  the record clearly audible under your voice. Every lyric line is attributed
+  live: "You" or "Solo", with a running session tally.
 - **Two modes** — *Auto* listens for your voice (best with headphones:
   the browser's echo cancellation suppresses the song playing from this same
   tab). *Manual* lets you hold the button — or the space bar — to take the
@@ -41,10 +42,12 @@ original vocals pick the song straight back up — a duet, solo.
 Spotify streams playback inside the SDK's cross-origin DRM iframe; that audio
 **cannot** be tapped into the Web Audio API, and Spotify's terms require
 content to stay "in its original form". So real-time vocal *removal* on the
-Spotify stream is not possible. Solo instead drives the duet through the SDK's
-**official volume control** — which is what makes the "other half" mechanic
-work: the artist's vocals themselves come back the moment you stop, so you
-always sing *with* the record, and the record sings back when you rest.
+Spotify stream is not possible, and there is no vocals-only stem to lower.
+Solo instead drives the duet through the SDK's **official volume control** —
+which is what makes the "other half" mechanic work: the artist's vocals
+themselves come back the moment you stop, so you always sing *with* the record,
+and the record sings back when you rest. The room slider controls the whole
+mix, so you can choose how present the record stays while you sing.
 
 ## Requirements
 

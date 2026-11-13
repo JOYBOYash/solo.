@@ -29,8 +29,11 @@ export class DuetEngine {
   lead: Lead = 'artist';
   /** Master volume 0..1 (what the artist plays at when you are not singing). */
   baseVolume = 1;
-  /** Fraction of the master volume while you sing (0..1). */
-  backingFactor = 0.12;
+  /**
+   * Fraction of the master volume while you sing (0..1). The default keeps the
+   * song clearly audible under the voice instead of making it feel muted.
+   */
+  backingFactor = 0.6;
 
   onLead: ((lead: Lead) => void) | null = null;
 
