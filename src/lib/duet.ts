@@ -7,7 +7,7 @@
 //   - while the mic hears you singing  ->  the artist ducks to a backing level
 //   - when you stop                    ->  the artist comes back and sings
 //
-// Manual mode lets you hold a button (or the space bar) to take the lead,
+// Manual mode lets you hold the Lead button (or the H key) to take the lead,
 // which is reliable even on speakers instead of headphones.
 
 import type { PlayerBridge } from './sdk';
@@ -41,6 +41,11 @@ export class DuetEngine {
     this.player = player;
     this.current = this.baseVolume;
     this.lastSent = -1;
+    // A new room always starts with Solo leading, never held over from the
+    // previous session's Manual hold.
+    this.manualHeld = false;
+    this.micSinging = false;
+    this.lead = 'artist';
     if (this.timer) window.clearInterval(this.timer);
     this.timer = window.setInterval(() => this.tick(), TICK_MS);
   }
@@ -71,6 +76,12 @@ export class DuetEngine {
 
   isSinging(): boolean {
     return this.mode === 'manual' ? this.manualHeld : this.micSinging;
+  }
+
+  /** Current artist volume relative to the master volume (0..1). */
+  get relativeVolume(): number {
+    if (this.baseVolume <= 0) return 0;
+    return Math.min(1, Math.max(0, this.current / this.baseVolume));
   }
 
   private micSinging = false;

@@ -1,25 +1,50 @@
 // The room: a dark, focused performance view. It wires the Web Playback SDK,
-// the microphone monitor, the duet engine and synced LRCLIB lyrics together.
+// the microphone monitor, the duet engine, synced lyrics, a dual waveform and
+// the Studio recorder together.
+//
+// Three views share the same playback:
+//   • Lyrics  — synced words with "You / Solo" attribution.
+//   • Theatre — no album art, no lyrics; two live waveforms.
+//   • Studio  — the same performance, with an explicit tab-audio recorder.
 
 import { el, artwork, toast, formatTime, dominantTint } from './dom';
-import { store, savePrefs, type RoomContext } from './store';
+import {
+  store,
+  savePrefs,
+  type RoomContext,
+  type RoomView,
+} from './store';
 import { PlayerBridge, type PlaybackState, type SdkTrack } from './lib/sdk';
 import { MicMonitor, describePitch } from './lib/mic';
 import { DuetEngine, type Lead } from './lib/duet';
 import { fetchLyrics, activeLineIndex, type Lyrics } from './lib/lrclib';
 import { startPlaylist, startTracks, transferPlayback, ApiError } from './lib/api';
+import { icon, type IconName } from './icons';
+import { DuetVisualizer } from './lib/visualizer';
+import {
+  StudioRecorder,
+  recorderSupported,
+  type RecorderStatus,
+} from './lib/recorder';
+
+const VIEWS: RoomView[] = ['lyrical', 'theatre', 'studio'];
 
 interface RoomRefs {
-  statusDot: HTMLElement;
+  root: HTMLElement;
+  statusChip: HTMLElement;
+  statusIcon: HTMLElement;
   statusText: HTMLElement;
+  recordBadge: HTMLButtonElement;
+  recordBadgeTime: HTMLElement;
   trackArt: HTMLElement;
   trackTitle: HTMLElement;
   trackArtists: HTMLElement;
   upNext: HTMLElement;
   lyricsPanel: HTMLElement;
   roomGlow: HTMLElement;
+  meterRow: HTMLElement;
   meterFill: HTMLElement;
-  pitch: HTMLElement;
+  pitchText: HTMLElement;
   posTime: HTMLElement;
   durTime: HTMLElement;
   progress: HTMLElement;
@@ -29,7 +54,28 @@ interface RoomRefs {
   segAuto: HTMLButtonElement;
   segManual: HTMLButtonElement;
   stats: HTMLElement;
+  views: Record<RoomView, HTMLElement>;
+  viewButtons: Record<RoomView, HTMLButtonElement>;
+  theatreStage: HTMLElement;
+  studioStage: HTMLElement;
+  studioStatus: HTMLElement;
+  studioTimer: HTMLElement;
+  studioHint: HTMLElement;
+  recordBtn: HTMLButtonElement;
+  recordBtnLabel: HTMLElement;
+  downloadRow: HTMLElement;
+  downloadBtn: HTMLButtonElement;
+  mixerBtn: HTMLButtonElement;
+  mixerPanel: HTMLElement;
+  calibrateBtn: HTMLButtonElement;
+  helpModal: HTMLElement;
+  helpClose: HTMLButtonElement;
   note: HTMLElement;
+}
+
+interface Lane {
+  lane: HTMLElement;
+  canvas: HTMLCanvasElement;
 }
 
 let ctx: RoomContext | null = null;
@@ -45,7 +91,20 @@ let counts = { you: 0, artist: 0 };
 let lines: { root: HTMLElement; text: HTMLElement }[] = [];
 let lastActive = -2;
 let raf = 0;
-let micAvailable = false;
+let micLevel = 0;
+
+let currentView: RoomView = 'lyrical';
+let recorder: StudioRecorder | null = null;
+let theatreVis: DuetVisualizer | null = null;
+let studioVis: DuetVisualizer | null = null;
+
+let helpOpen = false;
+let helpReturnFocus: HTMLElement | null = null;
+
+let lastRecorderPhase: RecorderStatus['phase'] = 'idle';
+let recordAudioSeen = false;
+let recordAudioWarned = false;
+let recordAudioCheckAt = 0;
 
 /* ------------------------------------------------------------
    Entry / exit
@@ -65,9 +124,22 @@ export function renderRoom(context: RoomContext, exitHandler: () => void): void 
   counts = { you: 0, artist: 0 };
   lines = [];
   lastActive = -2;
+  micLevel = 0;
+  currentView = store.prefs.view;
+  recorder = null;
+  theatreVis = null;
+  studioVis = null;
+  helpOpen = false;
+  helpReturnFocus = null;
+  lastRecorderPhase = 'idle';
+  recordAudioSeen = false;
+  recordAudioWarned = false;
+  recordAudioCheckAt = 0;
 
   const r = buildDom(context);
   refs = r;
+  setMode(store.prefs.mode);
+  setView(currentView, { persist: false });
   void init(r);
 }
 
@@ -77,17 +149,33 @@ export function closeRoom(): void {
   raf = 0;
   lyricsToken++;
   store.duet?.stop();
+
+  // Stop (and save) an in-flight Studio take before releasing the mic.
+  const activeRecorder = recorder;
+  recorder = null;
+  activeRecorder?.dispose();
+
   store.mic?.stop();
+  theatreVis?.stop();
+  studioVis?.stop();
+  theatreVis = null;
+  studioVis = null;
+
   // Leaving the room should not keep music playing in the background.
   void store.player?.pause();
   document.removeEventListener('keydown', onKeyDown);
   document.removeEventListener('keyup', onKeyUp);
   window.removeEventListener('blur', onBlur);
+
+  if (refs) refs.helpModal.hidden = true;
+  helpOpen = false;
+  helpReturnFocus = null;
   ctx = null;
   onExit = null;
   refs = null;
   playback = null;
   lyrics = null;
+  lines = [];
 }
 
 /* ------------------------------------------------------------
@@ -95,106 +183,369 @@ export function closeRoom(): void {
    ------------------------------------------------------------ */
 
 function buildDom(context: RoomContext): RoomRefs {
-  const statusDot = el('span', { class: 'status-dot' });
-  const statusText = el('span', {}, 'Connecting playback…');
-  const trackArt = el('span', {});
+  const statusIcon = el('span', { class: 'status-icon' });
+  const statusText = el('span', { class: 'status-text' }, 'Connecting');
+  const statusChip = el(
+    'span',
+    {
+      class: 'status-chip',
+      'data-kind': 'connecting',
+      role: 'status',
+      'aria-live': 'polite',
+    },
+    statusIcon,
+    statusText,
+  );
+
+  const recordBadgeTime = el('span', { class: 'record-badge-time' }, '0:00');
+  const recordBadge = el(
+    'button',
+    {
+      class: 'record-badge',
+      hidden: 'true',
+      'aria-label': 'Recording — open Studio',
+      title: 'Recording — open Studio',
+      onclick: () => setView('studio'),
+    },
+    icon('record', 12, 'record-badge-icon'),
+    recordBadgeTime,
+  ) as HTMLButtonElement;
+
+  const trackArt = el('span', { class: 'room-art' });
   const trackTitle = el('strong', {}, 'Loading track…');
   const trackArtists = el('span', {}, '');
   const upNext = el('div', { class: 'room-next', hidden: 'true' });
+  const trackPanel = el(
+    'div',
+    { class: 'room-track' },
+    trackArt,
+    el(
+      'div',
+      { class: 'room-track-text' },
+      trackTitle,
+      trackArtists,
+      upNext,
+    ),
+  );
+
+  const exitBtn = iconButton('arrowLeft', 'Leave room', () => exit(), 'room-exit');
+  const helpBtn = iconButton('help', 'Keyboard shortcuts (?)', () => openHelp());
+  const roomActions = el(
+    'div',
+    { class: 'room-actions' },
+    recordBadge,
+    statusChip,
+    helpBtn,
+  );
+  const roomTop = el('div', { class: 'room-top' }, exitBtn, trackPanel, roomActions);
+
+  const viewButtons = {} as Record<RoomView, HTMLButtonElement>;
+  const viewBar = el('div', {
+    class: 'view-bar',
+    role: 'tablist',
+    'aria-label': 'Playback mode',
+  });
+  const viewDefs: { view: RoomView; label: string; iconName: IconName; key: string }[] = [
+    { view: 'lyrical', label: 'Lyrical', iconName: 'captions', key: '1' },
+    { view: 'theatre', label: 'Theatre', iconName: 'audioLines', key: '2' },
+    { view: 'studio', label: 'Studio', iconName: 'disc', key: '3' },
+  ];
+  for (const def of viewDefs) {
+    const btn = el(
+      'button',
+      {
+        class: 'view-btn',
+        role: 'tab',
+        id: `tab-${def.view}`,
+        'aria-label': def.label,
+        'aria-controls': `view-${def.view}`,
+        'aria-selected': 'false',
+        tabindex: '-1',
+        title: `${def.label} (${def.key})`,
+        onclick: () => setView(def.view),
+      },
+      icon(def.iconName, 18),
+      el('span', { class: 'view-label' }, def.label),
+    ) as HTMLButtonElement;
+    viewButtons[def.view] = btn;
+    viewBar.append(btn);
+  }
+  viewBar.addEventListener('keydown', (e) => {
+    const event = e as KeyboardEvent;
+    if (event.key !== 'ArrowLeft' && event.key !== 'ArrowRight') return;
+    event.preventDefault();
+    const idx = VIEWS.indexOf(currentView);
+    const step = event.key === 'ArrowRight' ? 1 : -1;
+    const next = VIEWS[(idx + step + VIEWS.length) % VIEWS.length];
+    setView(next);
+    viewButtons[next].focus();
+  });
+
   const lyricsPanel = el('div', { class: 'lyrics-panel' });
+  const lyricsView = el(
+    'section',
+    { class: 'room-view lyrics-view', role: 'tabpanel', id: 'view-lyrical', 'aria-labelledby': 'tab-lyrical' },
+    lyricsPanel,
+  );
+
+  const theatreYou = makeLane('you', 'You', 'mic');
+  const theatreSolo = makeLane('solo', 'Solo', 'music');
+  const theatreStage = el(
+    'div',
+    { class: 'theatre-stage', 'data-lead': 'artist' },
+    theatreYou.lane,
+    theatreSolo.lane,
+  );
+  const theatreView = el(
+    'section',
+    {
+      class: 'room-view theatre-view',
+      role: 'tabpanel',
+      id: 'view-theatre',
+      'aria-labelledby': 'tab-theatre',
+      hidden: 'true',
+    },
+    theatreStage,
+  );
+
+  const studioYou = makeLane('you', 'You', 'mic');
+  const studioSolo = makeLane('solo', 'Solo', 'music');
+  const studioStatus = el(
+    'span',
+    { class: 'studio-status', role: 'status', 'aria-live': 'polite' },
+    'Ready',
+  );
+  const studioTimer = el('span', { class: 'studio-timer' }, '0:00');
+  const recordBtnLabel = el('span', { class: 'record-label' }, 'Record');
+  const recordBtn = el(
+    'button',
+    {
+      class: 'record-btn',
+      disabled: 'true',
+      title: 'Start a Studio take',
+      onclick: () => void toggleRecording(),
+    },
+    icon('record', 20, 'record-icon'),
+    recordBtnLabel,
+  ) as HTMLButtonElement;
+  const downloadBtn = el(
+    'button',
+    {
+      class: 'btn-dark download-btn',
+      title: 'Save the last take',
+      onclick: () => recorder?.downloadLast(),
+    },
+    icon('download', 16),
+    el('span', {}, 'Save take'),
+  ) as HTMLButtonElement;
+  const downloadRow = el('div', { class: 'studio-download' }, downloadBtn);
+  const studioHint = el(
+    'div',
+    { class: 'studio-hint' },
+    el('span', {}, icon('screen', 15), 'This tab'),
+    el('span', {}, icon('volume', 15), 'Share tab audio'),
+  );
+  const studioStage = el(
+    'div',
+    { class: 'studio-stage', 'data-lead': 'artist' },
+    el('div', { class: 'studio-waves' }, studioYou.lane, studioSolo.lane),
+    el(
+      'div',
+      { class: 'studio-controls' },
+      recordBtn,
+      studioTimer,
+      studioStatus,
+      downloadRow,
+    ),
+    studioHint,
+    el('p', { class: 'studio-note' }, 'Mic + song, mixed as you hear it. Saved only on this device.'),
+  );
+  const studioView = el(
+    'section',
+    {
+      class: 'room-view studio-view',
+      role: 'tabpanel',
+      id: 'view-studio',
+      'aria-labelledby': 'tab-studio',
+      hidden: 'true',
+    },
+    studioStage,
+  );
+
   const meterFill = el('div', { class: 'meter-fill' });
-  const pitch = el('span', { class: 'pitch' }, '—');
+  const pitchText = el('span', {}, '—');
+  const meterRow = el(
+    'div',
+    { class: 'meter-row' },
+    el('span', { class: 'meter-icon' }, icon('mic', 16)),
+    el('div', { class: 'meter' }, meterFill),
+    el('span', { class: 'pitch' }, icon('musicNote', 13), pitchText),
+  );
+
   const posTime = el('span', { class: 'time' }, '0:00');
   const durTime = el('span', { class: 'time' }, '0:00');
   const progressFill = el('div', { class: 'progress-fill' });
   const progress = el('div', { class: 'progress' });
-  const playBtn = el('button', { class: 'btn-dark', disabled: true }, 'Play') as HTMLButtonElement;
-  const holdBtn = el('button', { class: 'btn-dark', 'aria-pressed': 'false' }, 'Hold to take the lead') as HTMLButtonElement;
-  const segAuto = el('button', { class: 'seg-btn-dark active' }, 'Auto') as HTMLButtonElement;
-  const segManual = el('button', { class: 'seg-btn-dark' }, 'Manual') as HTMLButtonElement;
-  const stats = el('span', { class: 'session-stats', hidden: 'true' });
-  const note = el('p', { class: 'room-note' }, '');
-
   progress.append(progressFill);
-  playBtn.disabled = true;
+  const progressRow = el('div', { class: 'progress-row' }, posTime, progress, durTime);
 
+  const prevBtn = el(
+    'button',
+    {
+      class: 'transport-btn',
+      'aria-label': 'Previous track',
+      title: 'Previous',
+      onclick: () => void store.player?.previous(),
+    },
+    icon('previous', 20),
+  ) as HTMLButtonElement;
+  const playBtn = el(
+    'button',
+    {
+      class: 'play-btn',
+      disabled: 'true',
+      'aria-label': 'Play',
+      title: 'Play or pause (Space or K)',
+      onclick: () => void store.player?.togglePlay(),
+    },
+    icon('play', 26),
+  ) as HTMLButtonElement;
+  const nextBtn = el(
+    'button',
+    {
+      class: 'transport-btn',
+      'aria-label': 'Next track',
+      title: 'Next',
+      onclick: () => void store.player?.next(),
+    },
+    icon('next', 20),
+  ) as HTMLButtonElement;
+  const transport = el('div', { class: 'transport' }, prevBtn, playBtn, nextBtn);
+
+  const holdBtn = el(
+    'button',
+    {
+      class: 'lead-btn',
+      disabled: 'true',
+      'aria-pressed': 'false',
+      title: 'Switch to Manual to hold the lead (M)',
+    },
+    icon('mic', 22),
+    el('span', { class: 'lead-label' }, 'Lead'),
+  ) as HTMLButtonElement;
+
+  const segAuto = el(
+    'button',
+    {
+      class: 'seg-btn-dark active',
+      'aria-pressed': 'true',
+      title: 'Auto — detect your voice (A)',
+      onclick: () => setMode('auto'),
+    },
+    icon('radio', 16),
+    el('span', {}, 'Auto'),
+  ) as HTMLButtonElement;
+  const segManual = el(
+    'button',
+    {
+      class: 'seg-btn-dark',
+      'aria-pressed': 'false',
+      title: 'Manual — hold the lead (M)',
+      onclick: () => setMode('manual'),
+    },
+    icon('hand', 16),
+    el('span', {}, 'Manual'),
+  ) as HTMLButtonElement;
+  const modeGroup = el(
+    'div',
+    { class: 'segmented-dark', role: 'group', 'aria-label': 'Duet mode' },
+    segAuto,
+    segManual,
+  );
+
+  const mixerBtn = iconButton(
+    'sliders',
+    'Mixer and microphone settings',
+    () => toggleMixer(),
+    'mixer-toggle',
+  );
+  mixerBtn.setAttribute('aria-expanded', 'false');
+
+  const calibrateBtn = el(
+    'button',
+    {
+      class: 'btn-dark calibrate-btn',
+      title: 'Measure the room while it is quiet',
+      onclick: () => void calibrateMic(),
+    },
+    icon('audioLines', 16),
+    el('span', {}, 'Calibrate room'),
+  ) as HTMLButtonElement;
+
+  const mixerPanel = el(
+    'div',
+    { class: 'mixer-panel', hidden: 'true' },
+    sliderGroup('Master volume', Math.round(store.prefs.baseVolume * 100), (v) => {
+      store.duet?.setBaseVolume(v / 100);
+      store.prefs.baseVolume = v / 100;
+      savePrefs(store.prefs);
+    }),
+    sliderGroup(
+      'Song while you sing',
+      Math.round(store.prefs.backingFactor * 100),
+      (v) => {
+        store.duet?.setBackingFactor(v / 100);
+        store.prefs.backingFactor = v / 100;
+        savePrefs(store.prefs);
+      },
+      'The whole Spotify mix stays at this level under your voice.',
+    ),
+    sliderGroup(
+      'Mic sensitivity',
+      Math.round(store.prefs.sensitivity * 100),
+      (v) => {
+        if (store.mic) store.mic.sensitivity = v / 100;
+        store.prefs.sensitivity = v / 100;
+        savePrefs(store.prefs);
+      },
+      'Raise this if quiet singing is missed in Auto.',
+      { min: 50, max: 200 },
+    ),
+    el('div', { class: 'mixer-actions' }, calibrateBtn),
+  );
+
+  const stats = el('span', { class: 'session-stats', hidden: 'true' });
+  const note = el('p', { class: 'room-note', hidden: 'true', role: 'status' });
+
+  const roomControls = el(
+    'div',
+    { class: 'room-controls' },
+    transport,
+    holdBtn,
+    modeGroup,
+    mixerBtn,
+  );
+
+  const { modal: helpModal, closeBtn: helpClose } = buildHelpModal();
   const roomGlow = el('div', { class: 'room-glow' });
-
   const room = el(
     'main',
-    { class: 'room' },
+    { class: 'room', 'data-view': currentView },
     roomGlow,
     el(
       'div',
       { class: 'room-inner' },
-      el(
-        'div',
-        { class: 'room-top' },
-        el('button', { class: 'btn-dark', onclick: () => exit() }, 'Exit room'),
-        el(
-          'div',
-          { class: 'room-track' },
-          trackArt,
-          el(
-            'div',
-            { class: 'room-track-text' },
-            trackTitle,
-            trackArtists,
-            upNext,
-          ),
-        ),
-        el('span', { class: 'status-chip' }, statusDot, statusText),
-      ),
-      lyricsPanel,
-      el('div', { class: 'meter-row' }, el('span', { class: 'meter-label' }, 'Mic'), el('div', { class: 'meter' }, meterFill), pitch),
-      el(
-        'div',
-        { class: 'progress-row' },
-        posTime,
-        progress,
-        durTime,
-      ),
-      el(
-        'div',
-        { class: 'room-controls' },
-        el(
-          'div',
-          { class: 'ctrl-group' },
-          el('button', { class: 'btn-dark', onclick: () => void store.player?.previous() }, 'Previous'),
-          playBtn,
-          el('button', { class: 'btn-dark', onclick: () => void store.player?.next() }, 'Next'),
-        ),
-        holdBtn,
-        el(
-          'div',
-          { class: 'segmented-dark', role: 'group', 'aria-label': 'Duet mode' },
-          segAuto,
-          segManual,
-        ),
-        sliderGroup('Master volume', Math.round(store.prefs.baseVolume * 100), (v) => {
-          store.duet?.setBaseVolume(v / 100);
-          store.prefs.baseVolume = v / 100;
-          savePrefs(store.prefs);
-        }),
-        sliderGroup(
-          'Song level while you sing',
-          Math.round(store.prefs.backingFactor * 100),
-          (v) => {
-            store.duet?.setBackingFactor(v / 100);
-            store.prefs.backingFactor = v / 100;
-            savePrefs(store.prefs);
-          },
-          'Spotify streams one mix, so the whole song — vocals included — stays at this level.',
-        ),
-        sliderGroup('Mic sensitivity', Math.round(store.prefs.sensitivity * 100), (v) => {
-          if (store.mic) store.mic.sensitivity = v / 100;
-          store.prefs.sensitivity = v / 100;
-          savePrefs(store.prefs);
-        }),
-        stats,
-      ),
+      roomTop,
+      viewBar,
+      el('div', { class: 'room-stage' }, lyricsView, theatreView, studioView),
+      meterRow,
+      progressRow,
+      roomControls,
+      stats,
+      mixerPanel,
       note,
     ),
+    helpModal,
   );
 
   const app = document.getElementById('app') as HTMLElement;
@@ -202,14 +553,20 @@ function buildDom(context: RoomContext): RoomRefs {
   window.scrollTo(0, 0);
 
   // Interactions
-  playBtn.addEventListener('click', () => void store.player?.togglePlay());
-  holdBtn.addEventListener('pointerdown', () => setHeld(true));
-  holdBtn.addEventListener('pointerup', () => setHeld(false));
-  holdBtn.addEventListener('pointerleave', () => setHeld(false));
-  holdBtn.addEventListener('pointercancel', () => setHeld(false));
+  holdBtn.addEventListener('pointerdown', (e) => {
+    e.preventDefault();
+    try {
+      holdBtn.setPointerCapture(e.pointerId);
+    } catch {
+      /* pointer capture is a nice-to-have */
+    }
+    setHeld(true);
+  });
+  const release = () => setHeld(false);
+  holdBtn.addEventListener('pointerup', release);
+  holdBtn.addEventListener('pointercancel', release);
+  holdBtn.addEventListener('lostpointercapture', release);
   holdBtn.addEventListener('contextmenu', (e) => e.preventDefault());
-  segAuto.addEventListener('click', () => setMode('auto'));
-  segManual.addEventListener('click', () => setMode('manual'));
   progress.addEventListener('click', (e) => {
     if (!playback?.duration) return;
     const rect = progress.getBoundingClientRect();
@@ -221,7 +578,12 @@ function buildDom(context: RoomContext): RoomRefs {
   document.addEventListener('keyup', onKeyUp);
   window.addEventListener('blur', onBlur);
 
-  setMode(store.prefs.mode);
+  if (!recorderSupported()) {
+    studioStatus.textContent = 'Desktop Chrome or Edge needed';
+    recordBtn.title = 'Studio recording needs Chrome or Edge on desktop.';
+    studioHint.hidden = true;
+  }
+
   if (context.initialTrack) {
     renderTrackBasics(context.initialTrack);
   } else {
@@ -231,11 +593,114 @@ function buildDom(context: RoomContext): RoomRefs {
     trackArtists.textContent = 'Waiting for the first song from Spotify…';
   }
 
-  return {
-    statusDot, statusText, trackArt, trackTitle, trackArtists, upNext,
-    lyricsPanel, roomGlow, meterFill, pitch, posTime, durTime, progress, progressFill,
-    playBtn, holdBtn, segAuto, segManual, stats, note,
+  // Visualisers read the live mic and, when a Studio take is running, the real
+  // tab audio. Without tab audio the Solo lane follows the duet's volume.
+  const visualizerOptions = {
+    mic: { copy: (out: Float32Array) => store.mic?.copyWaveform(out) ?? false },
+    music: { copy: (out: Float32Array) => recorder?.copyMusicWaveform(out) ?? false },
+    micLevel: () => micLevel,
+    musicLevel: () => musicVisualLevel(),
+    playing: () => Boolean(playback && !playback.paused),
+    lead: (): Lead => (store.duet?.lead === 'you' ? 'you' : 'artist'),
   };
+  theatreVis = new DuetVisualizer({
+    micCanvas: theatreYou.canvas,
+    musicCanvas: theatreSolo.canvas,
+    ...visualizerOptions,
+  });
+  studioVis = new DuetVisualizer({
+    micCanvas: studioYou.canvas,
+    musicCanvas: studioSolo.canvas,
+    ...visualizerOptions,
+  });
+  theatreVis.start();
+  studioVis.start();
+
+  return {
+    root: room,
+    statusChip,
+    statusIcon,
+    statusText,
+    recordBadge,
+    recordBadgeTime,
+    trackArt,
+    trackTitle,
+    trackArtists,
+    upNext,
+    lyricsPanel,
+    roomGlow,
+    meterRow,
+    meterFill,
+    pitchText,
+    posTime,
+    durTime,
+    progress,
+    progressFill,
+    playBtn,
+    holdBtn,
+    segAuto,
+    segManual,
+    stats,
+    views: {
+      lyrical: lyricsView,
+      theatre: theatreView,
+      studio: studioView,
+    },
+    viewButtons,
+    theatreStage,
+    studioStage,
+    studioStatus,
+    studioTimer,
+    studioHint,
+    recordBtn,
+    recordBtnLabel,
+    downloadRow,
+    downloadBtn,
+    mixerBtn,
+    mixerPanel,
+    calibrateBtn,
+    helpModal,
+    helpClose,
+    note,
+  };
+}
+
+function iconButton(
+  iconName: IconName,
+  label: string,
+  onClick: () => void,
+  extraClass = '',
+): HTMLButtonElement {
+  return el(
+    'button',
+    {
+      class: `icon-btn${extraClass ? ` ${extraClass}` : ''}`,
+      'aria-label': label,
+      title: label,
+      onclick: onClick,
+    },
+    icon(iconName, 18),
+  ) as HTMLButtonElement;
+}
+
+function makeLane(kind: 'you' | 'solo', label: string, iconName: IconName): Lane {
+  const canvas = el('canvas', {
+    class: 'wave-canvas',
+    'aria-hidden': 'true',
+  }) as HTMLCanvasElement;
+  const lane = el(
+    'div',
+    { class: `wave-lane wave-${kind}` },
+    el(
+      'div',
+      { class: 'lane-head' },
+      icon(iconName, 15),
+      el('span', { class: 'lane-name' }, label),
+      el('span', { class: 'lane-live', 'aria-hidden': 'true' }),
+    ),
+    el('div', { class: 'lane-wave' }, canvas),
+  );
+  return { lane, canvas };
 }
 
 function sliderGroup(
@@ -243,12 +708,15 @@ function sliderGroup(
   value: number,
   onInput: (v: number) => void,
   hint?: string,
+  bounds?: { min: number; max: number },
 ): HTMLElement {
+  const min = bounds?.min ?? 0;
+  const max = bounds?.max ?? 100;
   const valueText = el('span', { class: 'slider-value' }, `${value}%`);
   const input = el('input', {
     type: 'range',
-    min: '0',
-    max: '100',
+    min: String(min),
+    max: String(max),
     value: String(value),
     'aria-label': label,
   }) as HTMLInputElement;
@@ -265,6 +733,88 @@ function sliderGroup(
   );
 }
 
+function buildHelpModal(): { modal: HTMLElement; closeBtn: HTMLButtonElement } {
+  const closeBtn = el(
+    'button',
+    {
+      class: 'icon-btn',
+      'aria-label': 'Close keyboard shortcuts',
+      title: 'Close (Esc)',
+      onclick: () => closeHelp(),
+    },
+    icon('close', 18),
+  ) as HTMLButtonElement;
+
+  const rows: { keys: string[]; label: string; iconName: IconName }[] = [
+    { keys: ['Space', 'K'], label: 'Play or pause', iconName: 'play' },
+    { keys: ['H'], label: 'Hold to take the lead', iconName: 'mic' },
+    { keys: ['A'], label: 'Auto mode', iconName: 'radio' },
+    { keys: ['M'], label: 'Manual mode', iconName: 'hand' },
+    { keys: ['1', '2', '3'], label: 'Lyrical / Theatre / Studio', iconName: 'captions' },
+    { keys: ['R'], label: 'Start or stop a Studio take', iconName: 'record' },
+    { keys: ['?'], label: 'Show shortcuts', iconName: 'keyboard' },
+    { keys: ['Esc'], label: 'Close this panel', iconName: 'close' },
+  ];
+
+  const modal = el(
+    'div',
+    {
+      class: 'shortcut-modal',
+      hidden: 'true',
+      role: 'dialog',
+      'aria-modal': 'true',
+      'aria-label': 'Keyboard shortcuts',
+    },
+    el(
+      'div',
+      { class: 'shortcut-card' },
+      el(
+        'div',
+        { class: 'shortcut-head' },
+        el(
+          'div',
+          { class: 'shortcut-title' },
+          icon('keyboard', 20),
+          el('h2', {}, 'Keyboard shortcuts'),
+        ),
+        closeBtn,
+      ),
+      el(
+        'div',
+        { class: 'shortcut-list' },
+        ...rows.map((row) =>
+          el(
+            'div',
+            { class: 'shortcut-row' },
+            el(
+              'div',
+              { class: 'shortcut-keys' },
+              ...row.keys.map((key) => el('kbd', {}, key)),
+            ),
+            el(
+              'span',
+              { class: 'shortcut-label' },
+              icon(row.iconName, 16),
+              row.label,
+            ),
+          ),
+        ),
+      ),
+      el(
+        'p',
+        { class: 'shortcut-hint' },
+        'Shortcuts stay out of the way while you are typing in a field.',
+      ),
+    ),
+  );
+
+  modal.addEventListener('click', (e) => {
+    if (e.target === modal) closeHelp();
+  });
+
+  return { modal, closeBtn };
+}
+
 /* ------------------------------------------------------------
    Bootstrap
    ------------------------------------------------------------ */
@@ -277,9 +827,11 @@ async function init(r: RoomRefs): Promise<void> {
     const mic = store.mic ?? (store.mic = new MicMonitor());
     mic.onState = (state) => {
       if (!store.roomActive || refs !== r) return;
+      micLevel = state.level;
       r.meterFill.style.width = `${Math.round(state.level * 100)}%`;
-      r.pitch.textContent =
+      r.pitchText.textContent =
         state.voiced && state.pitchHz ? describePitch(state.pitchHz) : '—';
+      r.meterRow.classList.toggle('voiced', state.voiced);
       store.duet?.setMicVoiced(state.voiced);
     };
     try {
@@ -292,23 +844,34 @@ async function init(r: RoomRefs): Promise<void> {
         return;
       }
       mic.sensitivity = store.prefs.sensitivity;
-      micAvailable = true;
     } catch {
       if (!store.roomActive || refs !== r) return;
-      micAvailable = false;
       toast('Microphone unavailable — switch to Manual mode and hold the lead button while you sing.', 'error');
       setMode('manual');
       r.segAuto.disabled = true;
+      r.segAuto.title = 'Microphone unavailable — Auto mode needs mic access.';
     }
 
-    // Refresh the note now that we know whether the mic actually started.
+    // Refresh the mode buttons now that we know whether the mic started.
     setMode(store.prefs.mode);
+
+    if (recorderSupported()) {
+      recorder = new StudioRecorder();
+      recorder.onStatus = (status) => {
+        if (!store.roomActive || refs !== r) return;
+        applyRecorderStatus(status);
+      };
+      if (ctx?.initialTrack) {
+        recorder.setLabel(ctx.initialTrack.name, ctx.initialTrack.artists.map((a) => a.name));
+      }
+      applyRecorderStatus({ phase: 'idle', elapsedMs: 0, result: null });
+    }
 
     const player = store.player ?? (store.player = new PlayerBridge());
     player.onState = (state) => handlePlayerState(state);
     player.onError = (error) => handleSdkError(error);
 
-    setStatus('connecting', 'Connecting playback…');
+    setStatus('connecting', 'Connecting');
     const deviceId = await player.connect();
     if (!store.roomActive || refs !== r) return;
 
@@ -319,9 +882,10 @@ async function init(r: RoomRefs): Promise<void> {
     duet.onLead = () => {
       if (!store.roomActive || refs !== r) return;
       updateStatus();
-      r.holdBtn.setAttribute('aria-pressed', duet.lead === 'you' ? 'true' : 'false');
+      updateLead();
     };
     duet.start(player);
+    updateLead();
 
     raf = requestAnimationFrame(tick);
 
@@ -336,7 +900,7 @@ async function init(r: RoomRefs): Promise<void> {
     const message = err instanceof Error ? err.message : 'Playback could not start.';
     setStatus('paused', 'Playback unavailable');
     toast(message, 'error');
-    if (refs) refs.note.textContent = message;
+    setNote(message);
   }
 }
 
@@ -382,7 +946,10 @@ function handlePlayerState(state: PlaybackState): void {
   if (!refs) return;
 
   refs.playBtn.disabled = false;
-  refs.playBtn.textContent = state.paused ? 'Play' : 'Pause';
+  refs.playBtn.replaceChildren(icon(state.paused ? 'play' : 'pause', 26));
+  const action = state.paused ? 'Play' : 'Pause';
+  refs.playBtn.setAttribute('aria-label', action);
+  refs.playBtn.title = `${action} (Space or K)`;
   refs.durTime.textContent = formatTime(state.duration / 1000);
 
   if (state.track.uri !== currentTrackUri) {
@@ -392,6 +959,9 @@ function handlePlayerState(state: PlaybackState): void {
     lastActive = -2;
     lyrics = null;
     renderTrack(state.track);
+    if (recorder && !recorder.isRecording) {
+      recorder.setLabel(state.track.name, state.track.artists.map((a) => a.name));
+    }
     void loadLyrics(state.track, state.duration);
     updateStats();
   }
@@ -399,7 +969,10 @@ function handlePlayerState(state: PlaybackState): void {
   const next = state.nextTracks[0];
   if (next) {
     refs.upNext.hidden = false;
-    refs.upNext.textContent = `Up next: ${next.name}`;
+    refs.upNext.replaceChildren(
+      icon('next', 12),
+      el('span', {}, `Up next: ${next.name}`),
+    );
   } else {
     refs.upNext.hidden = true;
   }
@@ -410,9 +983,10 @@ function handlePlayerState(state: PlaybackState): void {
 function handleSdkError(error: { kind: string; message: string }): void {
   if (!store.roomActive) return;
   toast(error.message, 'error');
-  if (error.kind === 'account' && refs) {
-    refs.note.textContent =
-      'Spotify Premium is required for in-browser playback. Close the room and connect with a Premium account.';
+  if (error.kind === 'account') {
+    setNote(
+      'Spotify Premium is required for in-browser playback. Close the room and connect with a Premium account.',
+    );
   }
 }
 
@@ -420,10 +994,14 @@ function handleSdkError(error: { kind: string; message: string }): void {
    Track + lyrics rendering
    ------------------------------------------------------------ */
 
-function renderTrackBasics(track: { name: string; artists: { name: string }[]; album?: { images: { url: string }[] } }): void {
+function renderTrackBasics(track: {
+  name: string;
+  artists: { name: string }[];
+  album?: { images: { url: string }[] };
+}): void {
   if (!refs) return;
   refs.trackArt.replaceChildren(
-    artwork(track.album?.images, '', `Artwork for ${track.name}`),
+    artwork(track.album?.images, 'room-art', `Artwork for ${track.name}`),
   );
   refs.trackTitle.textContent = track.name;
   refs.trackArtists.textContent = track.artists.map((a) => a.name).join(', ');
@@ -447,12 +1025,17 @@ async function applyRoomGlow(images: { url: string }[] | undefined): Promise<voi
     : '';
 }
 
-function setLyricsMessage(title: string, body: string | null): void {
+function setLyricsMessage(
+  title: string,
+  body: string | null,
+  iconName: IconName = 'captions',
+): void {
   if (!refs) return;
   refs.lyricsPanel.replaceChildren(
     el(
       'div',
       { class: 'lyrics-empty' },
+      el('span', { class: 'lyrics-empty-icon' }, icon(iconName, 30)),
       el('strong', {}, title),
       body ? el('p', {}, body) : null,
     ),
@@ -461,7 +1044,7 @@ function setLyricsMessage(title: string, body: string | null): void {
 
 async function loadLyrics(track: SdkTrack, durationMs: number): Promise<void> {
   const token = ++lyricsToken;
-  setLyricsMessage('Looking up lyrics…', 'Fetching time-synced lyrics from LRCLIB.');
+  setLyricsMessage('Looking up lyrics…', null, 'search');
   try {
     const result = await fetchLyrics(
       track.name,
@@ -483,6 +1066,16 @@ async function loadLyrics(track: SdkTrack, durationMs: number): Promise<void> {
 function renderLyrics(): void {
   if (!refs || !lyrics) return;
 
+  if (lyrics.instrumental) {
+    refs.stats.hidden = true;
+    setLyricsMessage(
+      'Instrumental track',
+      'No words to follow — the duet still works.',
+      'music',
+    );
+    return;
+  }
+
   if (lyrics.synced && lyrics.synced.length) {
     attributions = new Map();
     counts = { you: 0, artist: 0 };
@@ -498,21 +1091,23 @@ function renderLyrics(): void {
     return;
   }
 
+  refs.stats.hidden = true;
+
   if (lyrics.plain) {
-    setLyricsMessage('Unsynced lyrics', null);
     const pre = el('div', { class: 'plain-lyrics' }, lyrics.plain.trim());
     refs.lyricsPanel.replaceChildren(pre);
     return;
   }
 
   setLyricsMessage(
-    'No lyrics found for this track',
-    'The duet still works — Solo ducks the artist while you sing. These words just are not in the lyrics database yet.',
+    'No lyrics found for this version',
+    'The duet still works — this version simply is not in the lyrics databases yet.',
+    'captions',
   );
 }
 
 /* ------------------------------------------------------------
-   Ticker (position, active line, progress)
+   Ticker (position, active line, progress, recording check)
    ------------------------------------------------------------ */
 
 function tick(): void {
@@ -536,6 +1131,22 @@ function tick(): void {
       applyActive(idx);
     }
   }
+
+  if (recorder?.isRecording && playback && !playback.paused) {
+    if (!recordAudioSeen) {
+      if (!recordAudioCheckAt) recordAudioCheckAt = now;
+      if (recorder.musicRms() > 0.0008) recordAudioSeen = true;
+      else if (!recordAudioWarned && now - recordAudioCheckAt > 6000) {
+        recordAudioWarned = true;
+        toast(
+          'No song audio is reaching the take. Stop, retry, and enable “Share tab audio”.',
+          'error',
+        );
+      }
+    }
+  } else if (playback?.paused) {
+    recordAudioCheckAt = 0;
+  }
 }
 
 function applyActive(idx: number): void {
@@ -549,13 +1160,18 @@ function applyActive(idx: number): void {
     const lead = store.duet.lead;
     attributions.set(idx, lead);
     counts[lead] += 1;
-    const chip = el('span', { class: `who who-${lead}` }, lead === 'you' ? 'You' : 'Solo');
+    const chip = el(
+      'span',
+      { class: `who who-${lead}` },
+      icon(lead === 'you' ? 'mic' : 'music', 11),
+      el('span', {}, lead === 'you' ? 'You' : 'Solo'),
+    );
     lines[idx].root.prepend(chip);
     updateStats();
   }
 
   const active = idx >= 0 ? lines[idx] : null;
-  if (active) {
+  if (active && currentView === 'lyrical') {
     const reduce = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
     active.root.scrollIntoView({ block: 'center', behavior: reduce ? 'auto' : 'smooth' });
   }
@@ -565,12 +1181,19 @@ function updateStats(): void {
   if (!refs) return;
   if (!lyrics?.synced) {
     refs.stats.hidden = true;
+    refs.stats.replaceChildren();
     return;
   }
   refs.stats.hidden = false;
   refs.stats.replaceChildren(
-    'You sang ', el('strong', {}, String(counts.you)),
-    ' · Solo sang ', el('strong', {}, String(counts.artist)),
+    icon('mic', 13),
+    el('strong', {}, String(counts.you)),
+    icon('music', 13),
+    el('strong', {}, String(counts.artist)),
+  );
+  refs.stats.setAttribute(
+    'aria-label',
+    `You sang ${counts.you} lines, Solo sang ${counts.artist} lines`,
   );
 }
 
@@ -578,16 +1201,28 @@ function updateStats(): void {
    Controls
    ------------------------------------------------------------ */
 
-function setStatus(kind: 'you' | 'artist' | 'paused' | 'connecting', text: string): void {
+function setStatus(
+  kind: 'you' | 'artist' | 'paused' | 'connecting',
+  text: string,
+): void {
   if (!refs) return;
-  refs.statusDot.className = `status-dot${kind === 'you' ? ' you' : ''}${kind === 'paused' || kind === 'connecting' ? ' paused' : ''}`;
+  const iconName: IconName =
+    kind === 'you'
+      ? 'mic'
+      : kind === 'artist'
+        ? 'music'
+        : kind === 'paused'
+          ? 'pause'
+          : 'audioLines';
+  refs.statusIcon.replaceChildren(icon(iconName, 14));
+  refs.statusChip.dataset.kind = kind;
   refs.statusText.textContent = text;
 }
 
 function updateStatus(): void {
   if (!refs) return;
   if (!playback) {
-    setStatus('connecting', 'Connecting playback…');
+    setStatus('connecting', 'Connecting');
     return;
   }
   if (playback.paused) {
@@ -595,10 +1230,18 @@ function updateStatus(): void {
     return;
   }
   if (store.duet?.lead === 'you') {
-    setStatus('you', 'Your turn — mic is live');
+    setStatus('you', 'Your turn');
   } else {
-    setStatus('artist', 'Solo is singing');
+    setStatus('artist', 'Solo sings');
   }
+}
+
+function updateLead(): void {
+  if (!refs) return;
+  const you = store.duet?.lead === 'you';
+  refs.theatreStage.dataset.lead = you ? 'you' : 'artist';
+  refs.studioStage.dataset.lead = you ? 'you' : 'artist';
+  refs.holdBtn.setAttribute('aria-pressed', you ? 'true' : 'false');
 }
 
 function setHeld(held: boolean): void {
@@ -614,42 +1257,332 @@ function setMode(mode: 'auto' | 'manual'): void {
   savePrefs(store.prefs);
   refs.segAuto.classList.toggle('active', mode === 'auto');
   refs.segManual.classList.toggle('active', mode === 'manual');
+  refs.segAuto.setAttribute('aria-pressed', mode === 'auto' ? 'true' : 'false');
+  refs.segManual.setAttribute('aria-pressed', mode === 'manual' ? 'true' : 'false');
   refs.holdBtn.disabled = mode !== 'manual';
-  if (mode === 'auto') {
-    refs.holdBtn.setAttribute('aria-pressed', 'false');
-    refs.note.textContent = micAvailable
-      ? 'Auto — Solo lowers the song to your chosen level whenever it hears your voice, then brings it back when you stop. Headphones give the cleanest detection.'
-      : 'Auto is unavailable without a microphone. Hold the button (or space bar) while you sing in Manual mode.';
-  } else {
-    refs.note.textContent = 'Manual — hold the button (or space bar) while you sing; release and the full song comes back.';
-  }
+  refs.holdBtn.title =
+    mode === 'manual'
+      ? 'Hold to take the lead (H)'
+      : 'Switch to Manual to hold the lead (M)';
+  if (mode === 'auto') refs.holdBtn.setAttribute('aria-pressed', 'false');
   updateStatus();
 }
 
-function onKeyDown(e: KeyboardEvent): void {
-  if (e.code !== 'Space' || !store.roomActive) return;
-  const target = e.target as HTMLElement | null;
-  // Typing and sliders keep the space key; everywhere else in the room it is
-  // the manual "take the lead" control (including when a button has focus).
-  if (
-    target &&
-    (target.isContentEditable ||
-      target.tagName === 'INPUT' ||
-      target.tagName === 'TEXTAREA' ||
-      target.tagName === 'SELECT')
-  ) {
+function setView(view: RoomView, opts?: { persist?: boolean }): void {
+  if (!refs) return;
+  currentView = view;
+  refs.root.dataset.view = view;
+  for (const key of VIEWS) {
+    const active = key === view;
+    refs.views[key].hidden = !active;
+    refs.viewButtons[key].classList.toggle('active', active);
+    refs.viewButtons[key].setAttribute('aria-selected', active ? 'true' : 'false');
+    refs.viewButtons[key].tabIndex = active ? 0 : -1;
+  }
+  theatreVis?.setActive(view === 'theatre');
+  studioVis?.setActive(view === 'studio');
+  if (opts?.persist !== false) {
+    store.prefs.view = view;
+    savePrefs(store.prefs);
+  }
+}
+
+function toggleMixer(open?: boolean): void {
+  if (!refs) return;
+  const next = open ?? refs.mixerPanel.hidden;
+  refs.mixerPanel.hidden = !next;
+  refs.mixerBtn.setAttribute('aria-expanded', next ? 'true' : 'false');
+  refs.mixerBtn.classList.toggle('active', next);
+}
+
+function openHelp(): void {
+  if (!refs || helpOpen) return;
+  helpOpen = true;
+  helpReturnFocus =
+    document.activeElement instanceof HTMLElement ? document.activeElement : null;
+  refs.helpModal.hidden = false;
+  requestAnimationFrame(() => refs?.helpClose.focus());
+}
+
+function closeHelp(restoreFocus = true): void {
+  if (!refs) return;
+  helpOpen = false;
+  refs.helpModal.hidden = true;
+  if (restoreFocus) {
+    const target = helpReturnFocus;
+    helpReturnFocus = null;
+    target?.focus();
+  }
+}
+
+function setNote(message: string | null): void {
+  if (!refs) return;
+  refs.note.hidden = !message;
+  refs.note.textContent = message ?? '';
+}
+
+function musicVisualLevel(): number {
+  if (!playback || playback.paused) return 0;
+  const relative = store.duet?.relativeVolume ?? 1;
+  return Math.min(1, store.prefs.baseVolume * relative);
+}
+
+async function calibrateMic(): Promise<void> {
+  if (!refs) return;
+  const mic = store.mic;
+  if (!mic?.running) {
+    toast('Allow microphone access before calibrating.', 'error');
     return;
   }
-  e.preventDefault();
-  if (!e.repeat) setHeld(true);
+  const button = refs.calibrateBtn;
+  button.disabled = true;
+  toast('Stay quiet for a moment — measuring the room.');
+  try {
+    await mic.calibrate(1600);
+    toast('Microphone calibrated for this room.');
+  } catch (err) {
+    toast(err instanceof Error ? err.message : 'Calibration failed.', 'error');
+  } finally {
+    if (refs) refs.calibrateBtn.disabled = false;
+  }
+}
+
+/* ------------------------------------------------------------
+   Studio recording
+   ------------------------------------------------------------ */
+
+async function toggleRecording(): Promise<void> {
+  if (!refs) return;
+  if (!recorderSupported()) {
+    toast('Studio recording needs Chrome or Edge on desktop with tab audio.', 'error');
+    return;
+  }
+  setView('studio');
+  if (!recorder) return;
+
+  const phase = recorder.phase;
+  if (phase === 'requesting' || phase === 'finalizing') return;
+  if (phase === 'recording') {
+    await recorder.stop();
+    return;
+  }
+
+  const mic = store.mic;
+  if (!mic?.running) {
+    try {
+      await mic?.start();
+      if (refs) {
+        refs.segAuto.disabled = false;
+        refs.segAuto.title = 'Auto — detect your voice (A)';
+      }
+      if (mic) mic.sensitivity = store.prefs.sensitivity;
+      setMode(store.prefs.mode);
+    } catch {
+      toast('The microphone is needed for a Studio take. Allow mic access and try again.', 'error');
+      return;
+    }
+  }
+  if (!mic?.mediaStream) {
+    toast('The microphone is not available.', 'error');
+    return;
+  }
+
+  recordAudioSeen = false;
+  recordAudioWarned = false;
+  recordAudioCheckAt = 0;
+
+  const track = playback?.track;
+  try {
+    recorder.setLabel(
+      track?.name ?? 'Solo take',
+      track?.artists.map((a) => a.name) ?? [],
+    );
+    await recorder.start(mic.mediaStream);
+  } catch (err) {
+    if (store.roomActive) {
+      toast(err instanceof Error ? err.message : 'Recording could not start.', 'error');
+    }
+  }
+}
+
+function applyRecorderStatus(status: RecorderStatus): void {
+  if (!refs) return;
+  const { phase, elapsedMs, result } = status;
+
+  const recording = phase === 'recording';
+  const busy = phase === 'requesting' || phase === 'finalizing';
+  refs.recordBtn.classList.toggle('is-recording', recording);
+  // Stay clickable without the mic so a previously denied permission can be
+  // retried from Studio; toggleRecording() requests it when needed.
+  refs.recordBtn.disabled = busy || !recorder;
+  refs.recordBtn.replaceChildren(
+    icon(recording ? 'stop' : 'record', 20, 'record-icon'),
+    refs.recordBtnLabel,
+  );
+
+  const labels: Record<RecorderStatus['phase'], string> = {
+    idle: 'Record',
+    requesting: 'Allow…',
+    recording: 'Stop',
+    finalizing: 'Saving…',
+    saved: 'New take',
+    error: 'Try again',
+  };
+  refs.recordBtnLabel.textContent = labels[phase];
+
+  const statusLabels: Record<RecorderStatus['phase'], string> = {
+    idle: 'Ready',
+    requesting: 'Choose This tab',
+    recording: 'Recording',
+    finalizing: 'Saving take',
+    saved: 'Saved',
+    error: 'Try again',
+  };
+  refs.studioStatus.textContent = statusLabels[phase];
+  refs.studioStatus.dataset.phase = phase;
+  refs.studioStatus.title = status.message ?? '';
+
+  const timerMs =
+    phase === 'recording' || phase === 'finalizing'
+      ? elapsedMs
+      : result?.durationMs ?? 0;
+  refs.studioTimer.textContent = formatTime(timerMs / 1000);
+
+  refs.downloadRow.hidden = !result || busy || recording;
+  if (result) {
+    refs.downloadBtn.title = result.filename;
+    refs.downloadBtn.setAttribute('aria-label', `Save ${result.filename}`);
+  }
+
+  refs.recordBadge.hidden = !recording;
+  if (recording) refs.recordBadgeTime.textContent = formatTime(elapsedMs / 1000);
+  refs.viewButtons.studio.classList.toggle('has-recording', recording);
+
+  if (phase === 'saved' && lastRecorderPhase !== 'saved') {
+    toast('Studio take saved to your device.');
+  }
+  lastRecorderPhase = phase;
+}
+
+/* ------------------------------------------------------------
+   Keyboard
+   ------------------------------------------------------------ */
+
+function isTypingTarget(target: HTMLElement | null): boolean {
+  return Boolean(
+    target &&
+      (target.isContentEditable ||
+        target.tagName === 'INPUT' ||
+        target.tagName === 'TEXTAREA' ||
+        target.tagName === 'SELECT'),
+  );
+}
+
+function onKeyDown(e: KeyboardEvent): void {
+  if (!store.roomActive || !refs) return;
+
+  if (helpOpen) {
+    if (e.key === 'Escape') {
+      e.preventDefault();
+      closeHelp();
+    } else if (e.key === 'Tab') {
+      trapHelpFocus(e);
+    }
+    return;
+  }
+
+  if (e.key === 'Escape') {
+    if (!refs.mixerPanel.hidden) {
+      e.preventDefault();
+      toggleMixer(false);
+    }
+    return;
+  }
+
+  if (e.metaKey || e.ctrlKey || e.altKey) return;
+
+  if (isTypingTarget(e.target as HTMLElement | null)) return;
+
+  if (e.key === '?') {
+    e.preventDefault();
+    openHelp();
+    return;
+  }
+
+  if (e.code === 'Space' || e.code === 'KeyK') {
+    e.preventDefault();
+    if (!e.repeat) void store.player?.togglePlay();
+    return;
+  }
+
+  if (e.repeat) return;
+
+  switch (e.code) {
+    case 'KeyA':
+      if (!refs.segAuto.disabled) {
+        e.preventDefault();
+        setMode('auto');
+      }
+      break;
+    case 'KeyM':
+      e.preventDefault();
+      setMode('manual');
+      break;
+    case 'KeyH':
+      if (store.duet?.mode === 'manual') {
+        e.preventDefault();
+        setHeld(true);
+      }
+      break;
+    case 'KeyR':
+      e.preventDefault();
+      void toggleRecording();
+      break;
+    case 'Digit1':
+    case 'Numpad1':
+      e.preventDefault();
+      setView('lyrical');
+      break;
+    case 'Digit2':
+    case 'Numpad2':
+      e.preventDefault();
+      setView('theatre');
+      break;
+    case 'Digit3':
+    case 'Numpad3':
+      e.preventDefault();
+      setView('studio');
+      break;
+    default:
+      break;
+  }
 }
 
 function onKeyUp(e: KeyboardEvent): void {
-  if (e.code !== 'Space' || !store.roomActive) return;
-  setHeld(false);
+  if (!store.roomActive) return;
+  if (e.code === 'KeyH' && store.duet?.mode === 'manual') setHeld(false);
 }
 
 /** Releasing focus (tab switch, notification) must not leave the artist ducked. */
 function onBlur(): void {
   if (store.roomActive) setHeld(false);
+}
+
+function trapHelpFocus(e: KeyboardEvent): void {
+  if (!refs) return;
+  const focusables = Array.from(
+    refs.helpModal.querySelectorAll<HTMLElement>(
+      'button, [href], input, select, textarea, [tabindex]:not([tabindex="-1"])',
+    ),
+  );
+  if (!focusables.length) return;
+  const first = focusables[0];
+  const last = focusables[focusables.length - 1];
+  if (e.shiftKey && document.activeElement === first) {
+    e.preventDefault();
+    last.focus();
+  } else if (!e.shiftKey && document.activeElement === last) {
+    e.preventDefault();
+    first.focus();
+  }
 }

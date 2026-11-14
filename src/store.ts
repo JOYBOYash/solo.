@@ -15,11 +15,14 @@ export interface RoomContext {
   initialTrack?: Track;
 }
 
+export type RoomView = 'lyrical' | 'theatre' | 'studio';
+
 export interface Prefs {
   baseVolume: number;
   backingFactor: number;
   sensitivity: number;
   mode: 'auto' | 'manual';
+  view: RoomView;
 }
 
 const PREFS_KEY = 'solo.prefs';
@@ -28,11 +31,15 @@ const DEFAULT_BACKING_FACTOR = 0.6;
 /** The previous default was so low that the song felt muted under the voice. */
 const LEGACY_BACKING_FACTOR = 0.12;
 
+function readView(value: unknown): RoomView {
+  return value === 'theatre' || value === 'studio' ? value : 'lyrical';
+}
+
 export function loadPrefs(): Prefs {
   try {
     const raw = localStorage.getItem(PREFS_KEY);
     if (raw) {
-      const p = JSON.parse(raw) as Prefs;
+      const p = JSON.parse(raw) as Partial<Prefs>;
       const storedBacking = typeof p.backingFactor === 'number' ? p.backingFactor : null;
       return {
         baseVolume: clamp01(p.baseVolume ?? 1),
@@ -43,16 +50,27 @@ export function loadPrefs(): Prefs {
             : clamp01(storedBacking ?? DEFAULT_BACKING_FACTOR),
         sensitivity: Math.min(2, Math.max(0.5, p.sensitivity ?? 1)),
         mode: p.mode === 'manual' ? 'manual' : 'auto',
+        view: readView(p.view),
       };
     }
   } catch {
     /* defaults below */
   }
-  return { baseVolume: 1, backingFactor: DEFAULT_BACKING_FACTOR, sensitivity: 1, mode: 'auto' };
+  return {
+    baseVolume: 1,
+    backingFactor: DEFAULT_BACKING_FACTOR,
+    sensitivity: 1,
+    mode: 'auto',
+    view: 'lyrical',
+  };
 }
 
 export function savePrefs(prefs: Prefs): void {
-  localStorage.setItem(PREFS_KEY, JSON.stringify(prefs));
+  try {
+    localStorage.setItem(PREFS_KEY, JSON.stringify(prefs));
+  } catch {
+    /* storage disabled or full — keep the in-memory prefs for this session */
+  }
 }
 
 function clamp01(v: number): number {

@@ -26,6 +26,7 @@ import { el, artwork, avatar, toast, dominantTint } from './dom';
 import { store, type RoomContext } from './store';
 import { renderRoom, closeRoom } from './room';
 import { PlayerBridge } from './lib/sdk';
+import { icon } from './icons';
 
 const app = document.getElementById('app') as HTMLElement;
 
@@ -83,7 +84,7 @@ function shell(content: HTMLElement): void {
       el(
         'div',
         { class: 'footer-inner' },
-        el('span', {}, 'Solo — a personal duet player. Spotify playback requires Premium. Lyrics come from LRCLIB.'),
+        el('span', {}, 'Solo — a personal duet player. Spotify playback requires Premium. Lyrics come from LRCLIB and lyrics.ovh.'),
         el('span', {}, el('a', { href: 'https://developer.spotify.com/dashboard', target: '_blank', rel: 'noopener' }, 'Spotify for Developers')),
       ),
     ),
@@ -190,7 +191,7 @@ function shellConnect(content: HTMLElement): void {
       el(
         'div',
         { class: 'footer-inner' },
-        el('span', {}, 'Solo — a personal duet player. Spotify playback requires Premium. Lyrics come from LRCLIB.'),
+        el('span', {}, 'Solo — a personal duet player. Spotify playback requires Premium. Lyrics come from LRCLIB and lyrics.ovh.'),
       ),
     ),
   );
@@ -324,7 +325,7 @@ export function renderLibraryScreen(): void {
               id: 'library-refresh',
               disabled: playlistsLoading,
               onclick: () => void fetchPlaylists(),
-            }, 'Refresh'),
+            }, icon('refresh', 16), el('span', {}, 'Refresh')),
           ),
         ),
         el(
@@ -339,8 +340,8 @@ export function renderLibraryScreen(): void {
           el(
             'div',
             { class: 'segmented', role: 'tablist' },
-            el('button', { class: 'seg-btn active', 'data-scope': 'playlists', onclick: () => setScope('playlists') }, 'Playlists'),
-            el('button', { class: 'seg-btn', 'data-scope': 'songs', onclick: () => setScope('songs') }, 'Songs'),
+            el('button', { class: 'seg-btn active', 'data-scope': 'playlists', onclick: () => setScope('playlists') }, icon('music', 16), el('span', {}, 'Playlists')),
+            el('button', { class: 'seg-btn', 'data-scope': 'songs', onclick: () => setScope('songs') }, icon('search', 16), el('span', {}, 'Songs')),
           ),
         ),
       ),
@@ -441,7 +442,7 @@ function refreshLibraryLists(): void {
             { class: 'empty-state' },
             el('h3', {}, 'Could not load your playlists'),
             el('p', {}, playlistsError),
-            el('button', { class: 'btn btn-primary', onclick: () => void fetchPlaylists() }, 'Try again'),
+            el('button', { class: 'btn btn-primary', onclick: () => void fetchPlaylists() }, icon('refresh', 16), el('span', {}, 'Try again')),
           ),
         );
       } else {
@@ -658,7 +659,7 @@ function renderTracksScreen(
     el(
       'div',
       { class: 'container' },
-      el('a', { class: 'back-link', href: '#', onclick: (e) => { e.preventDefault(); void goLibrary(); } }, '← All playlists'),
+      el('a', { class: 'back-link', href: '#', onclick: (e) => { e.preventDefault(); void goLibrary(); } }, icon('arrowLeft', 16), el('span', {}, 'All playlists')),
       detail
         ? el(
             'div',
@@ -677,7 +678,7 @@ function renderTracksScreen(
                     el('button', {
                       class: 'btn btn-primary',
                       onclick: () => startPlaylistRoom(detail),
-                    }, 'Play from the start'),
+                    }, icon('play', 16), el('span', {}, 'Play from the start')),
                   ),
             ),
           )
@@ -700,7 +701,7 @@ function renderTracksScreen(
         el('button', {
           class: 'btn btn-primary',
           onclick: () => startPlaylistRoom(detail),
-        }, 'Play from the start'),
+        }, icon('play', 16), el('span', {}, 'Play from the start')),
       );
     } else if (tracks.length) {
       body = trackList(tracks, 'playlist');
@@ -787,7 +788,8 @@ function trackList(tracks: Track[], kind: 'playlist' | 'loose'): HTMLElement {
             onclick: (e) =>
               void startDuet(track, kind === 'playlist', e.currentTarget as HTMLButtonElement, kind === 'loose' ? tracks : undefined),
           },
-          'Sing',
+          icon('mic', 15),
+          el('span', {}, 'Sing'),
         ),
       ),
     ),

@@ -23,19 +23,26 @@ original vocals pick the song straight back up — a duet, solo.
   of playlists you own or collaborate on. Solo still shows followed playlists
   and offers **Play from the start**; the room picks up each song from the
   Playback SDK as Spotify plays it.
-- **Room** — a dark performance stage: the song plays through the Spotify Web
-  Playback SDK, time-synced lyrics stream from LRCLIB (free, no key), your live
-  mic level and detected note are metered, and the background glows with the
-  album art's colour.
+- **Room** — a dark, icon-first performance stage: the song plays through the
+  Spotify Web Playback SDK, time-synced lyrics arrive from LRCLIB (with a
+  lyrics.ovh fallback), your live mic level and detected note are metered, and
+  the background glows with the album art's colour.
 - **Duet engine** — while the microphone hears your voice, the song drops to a
   backing level (default 60% of your master volume); when you stop, it returns
   to full volume. The live **Song level while you sing** slider lets you keep
   the record clearly audible under your voice. Every lyric line is attributed
   live: "You" or "Solo", with a running session tally.
-- **Two modes** — *Auto* listens for your voice (best with headphones:
-  the browser's echo cancellation suppresses the song playing from this same
-  tab). *Manual* lets you hold the button — or the space bar — to take the
-  lead, which is rock-solid on speakers.
+- **Auto and Manual** — *Auto* listens for your voice with an adaptive noise
+  floor, voice-band/pitch evidence and hold-over, so quiet singing still takes
+  the lead (best with headphones: the browser's echo cancellation suppresses
+  the song playing from this same tab). *Manual* lets you hold the button — or
+  the **H** key — to take the lead, which is rock-solid on speakers. **Calibrate
+  room** samples a quiet moment when Auto needs a tighter baseline.
+- **Three views, same performance** — **Lyrical** for synced words, **Theatre**
+  for large dual waveforms with no lyrics or album art, and **Studio** for
+  recording a take. Switching views never interrupts playback or the duet.
+- **Studio takes** — explicitly start a recording to save your voice plus the
+  ducked song to your device. Nothing is uploaded.
 
 ### The honest engineering note
 
@@ -179,14 +186,97 @@ a public launch. Use the bring-your-own-Client-ID model for public use.
 
 1. Pick a playlist → pick a song → **Sing** (or **Play from the start**).
 2. Put headphones on (recommended) and watch the mic meter.
-3. Sing. The status chip flips between **Solo is singing** and
-   **Your turn — mic is live**; lyric lines are labelled as they happen.
-4. No headphones? Switch the room to **Manual** and hold **Hold to take the
-   lead** (or the space bar) while you sing.
+3. Sing. The status chip flips between **Solo sings** and **Your turn**; lyric
+   lines are labelled as they happen.
+4. No headphones? Switch the room to **Manual** and hold **Lead** (or **H**)
+   while you sing.
+5. Open the sliders button beside the mode switch for master volume, the song
+   level under your voice, mic sensitivity, and **Calibrate room**.
 
 Playback controls (previous/pause/next, click-to-seek) live in the room; when
 a song ends, the next one in the playlist or search queue starts and its
 lyrics load.
+
+## Views
+
+The three view tabs (or **1** / **2** / **3**) all run on the same playback and
+duet state. Solo remembers the last view you used.
+
+| View | What it shows |
+| --- | --- |
+| **Lyrical** | The synced words, with each line attributed to **You** or **Solo**. Plain lyrics appear when no synced version exists. |
+| **Theatre** | Two large, soothing waveforms: green for your microphone, white for Solo. The active lead lane glows. No lyrics or album art, so it is easy on the eyes while singing. |
+| **Studio** | The same dual waveforms plus an explicit recorder, timer, status, and a **Save take** button for the last recording. |
+
+### What the waveforms are
+
+The **You** lane is always the real microphone signal. Spotify's audio lives
+inside the SDK's cross-origin DRM iframe, so the **Solo** lane cannot read it
+directly: during a Studio take it shows the real captured tab audio; otherwise
+it is a smooth waveform whose amplitude follows the actual playback volume,
+including pauses and duet ducking. The lead lane's border and live dot show who
+is singing right now.
+
+## Studio recording
+
+Studio records **your microphone plus the song as you hear it**, including the
+duet's volume changes, and saves the mix on your device.
+
+1. Open **Studio** and press **Record** (or **R**).
+2. In the browser picker choose **This tab** and switch on **Share tab audio**.
+   Chrome and Edge on desktop are the supported target. Without any shared tab
+   audio Solo refuses the take and explains; if the shared track stays silent,
+   a warning asks you to stop and retry with tab audio enabled.
+3. Sing. The timer and red badge show that a take is running, and the badge stays
+   visible in every view.
+4. Press **Stop**. Solo finalises the file and downloads it automatically; the
+   latest take can be downloaded again with **Save take**.
+5. Leaving the room while recording finalises and downloads the take as well.
+
+Recording is opt-in on every take, and audio never leaves the browser. The
+recorder cannot capture the Spotify stream directly (DRM/cross-origin), which is
+why tab audio is required. Mobile browsers generally cannot capture tab audio;
+Studio shows a desktop-browser notice there.
+
+## Keyboard shortcuts
+
+Shortcuts are ignored while you are typing in a search field or any other input.
+Press **?** in the room to see this list.
+
+| Keys | Action |
+| --- | --- |
+| **Space** / **K** | Play or pause |
+| **A** | Auto mode |
+| **M** | Manual mode |
+| **H** (hold) | Take the lead in Manual mode |
+| **1** / **2** / **3** | Lyrical / Theatre / Studio |
+| **R** | Start or stop a Studio take |
+| **?** | Open the shortcut panel |
+| **Esc** | Close the shortcut panel or mixer |
+
+## Lyrics matching
+
+Solo queries two free, keyless, CORS-enabled sources:
+
+- **[LRCLIB](https://lrclib.net)** for synced LRC and plain lyrics.
+- **[lyrics.ovh](https://lyrics.ovh)** as a plain-text fallback when LRCLIB has
+  no usable record.
+
+Streaming titles are ambiguous, so candidates are scored against the real
+Spotify title, all credited artists, album, duration, synced availability and
+version markers (remix, live, acoustic, instrumental, karaoke, demo, cover,
+sped-up/slowed, extended). Version markers and title evidence are hard gates,
+not soft penalties: a remix or live version never silently falls back to the
+original version's words, and a one-word title is never accepted for a longer,
+different title. A bounded second search runs for version-tagged songs when the
+first query only returns the original recording.
+
+Because lyrics.ovh has no metadata and fuzzy-matches unknown titles, Solo uses
+it only when LRCLIB has no candidates at all, and only after confirming the
+exact song in the free [iTunes Search API](https://performance-partners.apple.com/search-api)
+with compatible artist and duration. If that validation cannot run, Solo shows
+no lyrics rather than guessed ones. Successful lookups are cached for the
+session; misses are retried on the next visit.
 
 ## Project layout
 
@@ -194,18 +284,21 @@ lyrics load.
 src/
   main.ts            boot, OAuth callback handling, ?client_id= support
   ui.ts              connect screen, library (playlists + song search), playlist view
-  room.ts            the performance view: playback wiring, lyrics, controls
+  room.ts            the performance view: playback wiring, views, controls, recording
   store.ts           cross-screen session state + persisted preferences
   dom.ts             tiny DOM helpers, artwork/avatar placeholders, colour tinting
+  icons.ts           inline SVG icon set (Lucide-style, no dependency)
   style.css          the Spotify-inspired design system
   lib/
     auth.ts          Authorization Code + PKCE (S256), token refresh
     api.ts           Spotify Web API client (only endpoints available to new apps)
     sdk.ts           Web Playback SDK loader + typed Player bridge
     duet.ts          the ducking engine (auto + manual modes)
-    mic.ts           microphone VAD: RMS + voice-band ratio, hold-over, pitch
-    lrclib.ts        LRCLIB lyrics (synced LRC + plain), LRC parser
-    clean.ts         title/artist cleanup for accurate lyrics matching
+    mic.ts           microphone VAD: adaptive floor, band/pitch evidence, hold-over
+    recorder.ts      mic + tab-audio Studio recorder (Web Audio + MediaRecorder)
+    visualizer.ts    dual-lane Theatre/Studio waveforms
+    lrclib.ts        LRCLIB + lyrics.ovh lookup, scoring, LRC parser
+    clean.ts         version-aware title/artist cleanup for lyrics matching
     config.ts        Client ID storage, env defaults, portable redirect URI
 ```
 
@@ -240,7 +333,10 @@ mic and the playback state instead.
 | Playlists load but a followed playlist has no songs | This is Spotify's February 2026 API rule. Use **Play from the start**; Solo will follow the playback. |
 | Room opens but no sound, "Premium required" | The connected account is a free plan. In-browser playback requires Premium. |
 | Mic meter never moves | The browser blocked the microphone — allow it for the site in the address bar, then reload and re-enter the room. |
+| Auto mode misses quiet singing | Open the sliders panel and raise **Mic sensitivity**, press **Calibrate room** while the room is quiet, or switch to Manual. Headphones improve separation. |
 | App ducks constantly on speakers | Use headphones, or lower *Mic sensitivity*, or switch to Manual mode. |
+| Studio says "Choose This tab" or captures no song | In the share picker choose **This tab** and enable **Share tab audio**. Chrome or Edge on desktop is required; mobile browsers usually cannot capture tab audio. |
+| Studio recording is unavailable | Use Chrome/Edge on desktop over HTTPS (Vercel) or `http://127.0.0.1` locally. Safari/Firefox and mobile browsers are not reliable targets for tab-audio capture. |
 | Playback stalls on first song | Some browsers block autoplay once per session — press **Play** in the room once. |
 
 ## Fair-use notes
@@ -249,6 +345,6 @@ Solo is a personal, non-commercial tool. Spotify's developer terms limit
 streaming integrations to non-commercial use and require keeping content in
 its original form — Solo therefore uses only official playback controls
 (transport + volume) and never modifies or extracts Spotify audio. Lyrics are
-provided by [LRCLIB](https://lrclib.net), a free community database. The
-visual style is inspired by Spotify's design language; Solo is not affiliated
-with Spotify AB.
+provided by [LRCLIB](https://lrclib.net) and [lyrics.ovh](https://lyrics.ovh),
+free community databases. The visual style is inspired by Spotify's design
+language; Solo is not affiliated with Spotify AB.
