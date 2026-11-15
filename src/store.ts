@@ -16,6 +16,7 @@ export interface RoomContext {
 }
 
 export type RoomView = 'lyrical' | 'theatre' | 'studio';
+export type TheatreStyle = 'wave' | 'lava';
 
 export interface Prefs {
   baseVolume: number;
@@ -23,6 +24,7 @@ export interface Prefs {
   sensitivity: number;
   mode: 'auto' | 'manual';
   view: RoomView;
+  theatreStyle: TheatreStyle;
 }
 
 const PREFS_KEY = 'solo.prefs';
@@ -33,6 +35,10 @@ const LEGACY_BACKING_FACTOR = 0.12;
 
 function readView(value: unknown): RoomView {
   return value === 'theatre' || value === 'studio' ? value : 'lyrical';
+}
+
+function readTheatreStyle(value: unknown): TheatreStyle {
+  return value === 'lava' ? 'lava' : 'wave';
 }
 
 export function loadPrefs(): Prefs {
@@ -51,6 +57,7 @@ export function loadPrefs(): Prefs {
         sensitivity: Math.min(2, Math.max(0.5, p.sensitivity ?? 1)),
         mode: p.mode === 'manual' ? 'manual' : 'auto',
         view: readView(p.view),
+        theatreStyle: readTheatreStyle(p.theatreStyle),
       };
     }
   } catch {
@@ -62,6 +69,7 @@ export function loadPrefs(): Prefs {
     sensitivity: 1,
     mode: 'auto',
     view: 'lyrical',
+    theatreStyle: 'wave',
   };
 }
 

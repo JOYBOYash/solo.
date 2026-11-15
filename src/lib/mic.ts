@@ -23,12 +23,19 @@ const NOTE_NAMES = ['C', 'C♯', 'D', 'D♯', 'E', 'F', 'F♯', 'G', 'G♯', 'A'
 const VOICE_HOLD_MS = 1100;
 const WARMUP_MS = 1200;
 
+export function midiFromHz(hz: number): number {
+  return 69 + 12 * Math.log2(hz / 440);
+}
+
+export function noteName(hz: number): string {
+  const midi = Math.round(midiFromHz(hz));
+  const name = NOTE_NAMES[((midi % 12) + 12) % 12];
+  const octave = Math.floor(midi / 12) - 1;
+  return `${name}${octave}`;
+}
+
 export function describePitch(hz: number): string {
-  const midi = 69 + 12 * Math.log2(hz / 440);
-  const rounded = Math.round(midi);
-  const name = NOTE_NAMES[((rounded % 12) + 12) % 12];
-  const octave = Math.floor(rounded / 12) - 1;
-  return `${name}${octave} · ${Math.round(hz)} Hz`;
+  return `${noteName(hz)} · ${Math.round(hz)} Hz`;
 }
 
 function sleep(ms: number): Promise<void> {
@@ -72,6 +79,11 @@ export class MicMonitor {
   /** The live microphone stream, shared with the Studio recorder. */
   get mediaStream(): MediaStream | null {
     return this.stream;
+  }
+
+  /** Latest detected fundamental, or null when the singer is silent. */
+  get pitch(): number | null {
+    return this.pitchHz;
   }
 
   async start(): Promise<void> {
@@ -287,7 +299,7 @@ export class MicMonitor {
  * Bounded normalized autocorrelation pitch detector (70 Hz – 1 kHz).
  * Runs on a decimated copy of the frame to stay cheap.
  */
-function detectPitch(
+export function detectPitch(
   buf: Float32Array,
   sampleRate: number,
   minRms = 0.01,

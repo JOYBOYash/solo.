@@ -39,10 +39,12 @@ original vocals pick the song straight back up — a duet, solo.
   the **H** key — to take the lead, which is rock-solid on speakers. **Calibrate
   room** samples a quiet moment when Auto needs a tighter baseline.
 - **Three views, same performance** — **Lyrical** for synced words, **Theatre**
-  for large dual waveforms with no lyrics or album art, and **Studio** for
-  recording a take. Switching views never interrupts playback or the duet.
+  for one full-bleed wave or lava visual with no lyrics, and **Studio** for a
+  lyric teleprompter with a live pitch guide and an explicit take recorder.
+  Switching views never interrupts playback or the duet.
 - **Studio takes** — explicitly start a recording to save your voice plus the
-  ducked song to your device. Nothing is uploaded.
+  ducked song to your device. The pitch guide compares your live note with the
+  song while you sing. Nothing is uploaded.
 
 ### The honest engineering note
 
@@ -200,35 +202,47 @@ lyrics load.
 ## Views
 
 The three view tabs (or **1** / **2** / **3**) all run on the same playback and
-duet state. Solo remembers the last view you used.
+duet state. Solo remembers the last view you used, and whether Theatre was on
+**Wave** or **Lava**.
 
 | View | What it shows |
 | --- | --- |
 | **Lyrical** | The synced words, with each line attributed to **You** or **Solo**. Plain lyrics appear when no synced version exists. |
-| **Theatre** | Two large, soothing waveforms: green for your microphone, white for Solo. The active lead lane glows. No lyrics or album art, so it is easy on the eyes while singing. |
-| **Studio** | The same dual waveforms plus an explicit recorder, timer, status, and a **Save take** button for the last recording. |
+| **Theatre** | One full-bleed visual with no scrolling: layered green and warm-white **Wave** ribbons, or a slow **Lava** plasma field. The active lead glows. Switch styles with the Wave/Lava buttons or **V**. |
+| **Studio** | A five-line lyric teleprompter with the current line centred, a scrolling **pitch guide** (your voice against the song), then the recorder, timer, status, and **Save take**. |
 
-### What the waveforms are
+### What the visuals show
 
-The **You** lane is always the real microphone signal. Spotify's audio lives
-inside the SDK's cross-origin DRM iframe, so the **Solo** lane cannot read it
-directly: during a Studio take it shows the real captured tab audio; otherwise
-it is a smooth waveform whose amplitude follows the actual playback volume,
-including pauses and duet ducking. The lead lane's border and live dot show who
-is singing right now.
+The green voice is always the real microphone signal. Spotify's audio lives
+inside the SDK's cross-origin DRM iframe, so the song cannot be read directly:
+during a Studio take the visuals use the real captured tab audio; otherwise the
+Theatre's warm layer is a calm synthetic ribbon whose amplitude follows the
+actual playback volume, including pauses and duet ducking.
+
+The Studio pitch guide is literal: your live note is the green contour, the
+warm dashed line is the song's detected note folded into the octave nearest your
+voice, and the shaded band is a comfortable ±0.8 semitones. The mirrored strip
+underneath shows your loudness above the line and the song's below it. The song
+reference exists only during a take, because that is the only time the browser
+lets Solo hear the tab; before then the guide says **Guide in takes** and your
+note is placed on an absolute pitch window instead of being judged against a
+target. During a take, ±45 cents reads **In tune**, up to ±90 cents reads
+**A little sharp/flat**, and beyond that **Sharp ↑ / Flat ↓**.
 
 ## Studio recording
 
 Studio records **your microphone plus the song as you hear it**, including the
-duet's volume changes, and saves the mix on your device.
+duet's volume changes, and saves the mix on your device. While the take runs,
+the pitch guide and the note readout show how your voice sits against the song.
 
 1. Open **Studio** and press **Record** (or **R**).
 2. In the browser picker choose **This tab** and switch on **Share tab audio**.
    Chrome and Edge on desktop are the supported target. Without any shared tab
    audio Solo refuses the take and explains; if the shared track stays silent,
    a warning asks you to stop and retry with tab audio enabled.
-3. Sing. The timer and red badge show that a take is running, and the badge stays
-   visible in every view.
+3. Sing. The teleprompter keeps the current line centred, the pitch guide draws
+   your voice against the song, and the timer and red badge show that a take is
+   running. The badge stays visible in every view.
 4. Press **Stop**. Solo finalises the file and downloads it automatically; the
    latest take can be downloaded again with **Save take**.
 5. Leaving the room while recording finalises and downloads the take as well.
@@ -251,6 +265,7 @@ Press **?** in the room to see this list.
 | **H** (hold) | Take the lead in Manual mode |
 | **1** / **2** / **3** | Lyrical / Theatre / Studio |
 | **R** | Start or stop a Studio take |
+| **V** | Switch Theatre between Wave and Lava |
 | **?** | Open the shortcut panel |
 | **Esc** | Close the shortcut panel or mixer |
 
@@ -296,7 +311,8 @@ src/
     duet.ts          the ducking engine (auto + manual modes)
     mic.ts           microphone VAD: adaptive floor, band/pitch evidence, hold-over
     recorder.ts      mic + tab-audio Studio recorder (Web Audio + MediaRecorder)
-    visualizer.ts    dual-lane Theatre/Studio waveforms
+    visualizer.ts    full-bleed Theatre wave / lava canvas
+    studio-visualizer.ts  Studio pitch ribbon and mirrored level strip
     lrclib.ts        LRCLIB + lyrics.ovh lookup, scoring, LRC parser
     clean.ts         version-aware title/artist cleanup for lyrics matching
     config.ts        Client ID storage, env defaults, portable redirect URI

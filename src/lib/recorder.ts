@@ -9,6 +9,8 @@
 // The mix is built with Web Audio (mic + tab -> MediaStreamDestination) and
 // encoded with MediaRecorder. No audio is ever uploaded anywhere.
 
+import { detectPitch } from './mic';
+
 export type RecorderPhase =
   | 'idle'
   | 'requesting'
@@ -122,6 +124,8 @@ export class StudioRecorder {
   private chunks: BlobPart[] = [];
   private musicAnalyser: AnalyserNode | null = null;
   private musicBuf: Float32Array<ArrayBuffer> = new Float32Array(0);
+  private lastMusicPitch: number | null = null;
+  private lastMusicPitchAt = 0;
 
   private startedAt = 0;
   private timer = 0;
@@ -375,6 +379,28 @@ export class StudioRecorder {
     return Math.sqrt(sum / this.musicBuf.length);
   }
 
+  /**
+   * Detected fundamental of the captured song audio, throttled to ~11 Hz. The
+   * Studio pitch ribbon uses this to show how the singer's note sits against
+   * the song. Only available while a take is running (tab audio is captured
+   * by the recorder).
+   */
+  musicPitch(): number | null {
+    if (!this.musicAnalyser || !this.ctx) return null;
+    const now = performance.now();
+    if (now - this.lastMusicPitchAt < 90) return this.lastMusicPitch;
+    this.lastMusicPitchAt = now;
+    this.musicAnalyser.getFloatTimeDomainData(this.musicBuf);
+    let sum = 0;
+    for (const sample of this.musicBuf) sum += sample * sample;
+    const rms = Math.sqrt(sum / this.musicBuf.length);
+    this.lastMusicPitch =
+      rms > 0.002
+        ? detectPitch(this.musicBuf, this.ctx.sampleRate, 0.0015, 0.42)
+        : null;
+    return this.lastMusicPitch;
+  }
+
   /** Called when the room closes; an in-flight take is still saved. */
   dispose(): void {
     this.disposed = true;
@@ -479,6 +505,8 @@ export class StudioRecorder {
     this.recorder = null;
     this.musicAnalyser = null;
     this.musicBuf = new Float32Array(0);
+    this.lastMusicPitch = null;
+    this.lastMusicPitchAt = 0;
   }
 
   private emit(): void {

@@ -1,11 +1,12 @@
 // The room: a dark, focused performance view. It wires the Web Playback SDK,
-// the microphone monitor, the duet engine, synced lyrics, a dual waveform and
-// the Studio recorder together.
+// the microphone monitor, the duet engine, synced lyrics and the Studio
+// recorder together.
 //
 // Three views share the same playback:
-//   • Lyrics  — synced words with "You / Solo" attribution.
-//   • Theatre — no album art, no lyrics; two live waveforms.
-//   • Studio  — the same performance, with an explicit tab-audio recorder.
+//   • Lyrical — synced words with "You / Solo" attribution.
+//   • Theatre — a single full-height visual: wave or lava, no lyrics.
+//   • Studio  — teleprompter lyrics plus a live voice-vs-song pitch ribbon and
+//               an explicit tab-audio recorder.
 
 import { el, artwork, toast, formatTime, dominantTint } from './dom';
 import {
@@ -13,14 +14,16 @@ import {
   savePrefs,
   type RoomContext,
   type RoomView,
+  type TheatreStyle,
 } from './store';
 import { PlayerBridge, type PlaybackState, type SdkTrack } from './lib/sdk';
-import { MicMonitor, describePitch } from './lib/mic';
+import { MicMonitor, describePitch, noteName, midiFromHz } from './lib/mic';
 import { DuetEngine, type Lead } from './lib/duet';
 import { fetchLyrics, activeLineIndex, type Lyrics } from './lib/lrclib';
 import { startPlaylist, startTracks, transferPlayback, ApiError } from './lib/api';
 import { icon, type IconName } from './icons';
-import { DuetVisualizer } from './lib/visualizer';
+import { TheatreVisualizer } from './lib/visualizer';
+import { StudioVisualizer } from './lib/studio-visualizer';
 import {
   StudioRecorder,
   recorderSupported,
@@ -57,7 +60,16 @@ interface RoomRefs {
   views: Record<RoomView, HTMLElement>;
   viewButtons: Record<RoomView, HTMLButtonElement>;
   theatreStage: HTMLElement;
+  theatreCanvas: HTMLCanvasElement;
+  theatreStyleButtons: Record<TheatreStyle, HTMLButtonElement>;
+  theatreLead: HTMLElement;
   studioStage: HTMLElement;
+  studioCanvas: HTMLCanvasElement;
+  studioLines: { root: HTMLElement; text: HTMLElement; offset: number }[];
+  studioLyricsHint: HTMLElement;
+  studioPitchNote: HTMLElement;
+  studioPitchTarget: HTMLElement;
+  studioPitchTune: HTMLElement;
   studioStatus: HTMLElement;
   studioTimer: HTMLElement;
   studioHint: HTMLElement;
@@ -71,11 +83,6 @@ interface RoomRefs {
   helpModal: HTMLElement;
   helpClose: HTMLButtonElement;
   note: HTMLElement;
-}
-
-interface Lane {
-  lane: HTMLElement;
-  canvas: HTMLCanvasElement;
 }
 
 let ctx: RoomContext | null = null;
@@ -95,8 +102,9 @@ let micLevel = 0;
 
 let currentView: RoomView = 'lyrical';
 let recorder: StudioRecorder | null = null;
-let theatreVis: DuetVisualizer | null = null;
-let studioVis: DuetVisualizer | null = null;
+let theatreVis: TheatreVisualizer | null = null;
+let studioVis: StudioVisualizer | null = null;
+let lastStudioPitchAt = 0;
 
 let helpOpen = false;
 let helpReturnFocus: HTMLElement | null = null;
@@ -129,6 +137,7 @@ export function renderRoom(context: RoomContext, exitHandler: () => void): void 
   recorder = null;
   theatreVis = null;
   studioVis = null;
+  lastStudioPitchAt = 0;
   helpOpen = false;
   helpReturnFocus = null;
   lastRecorderPhase = 'idle';
@@ -139,6 +148,7 @@ export function renderRoom(context: RoomContext, exitHandler: () => void): void 
   const r = buildDom(context);
   refs = r;
   setMode(store.prefs.mode);
+  setTheatreStyle(store.prefs.theatreStyle, { persist: false });
   setView(currentView, { persist: false });
   void init(r);
 }
@@ -288,13 +298,58 @@ function buildDom(context: RoomContext): RoomRefs {
     lyricsPanel,
   );
 
-  const theatreYou = makeLane('you', 'You', 'mic');
-  const theatreSolo = makeLane('solo', 'Solo', 'music');
+  const theatreCanvas = el('canvas', {
+    class: 'theatre-canvas',
+    'aria-hidden': 'true',
+  }) as HTMLCanvasElement;
+  const theatreStyleButtons = {} as Record<TheatreStyle, HTMLButtonElement>;
+  const theatreStyleBar = el('div', {
+    class: 'theatre-style',
+    role: 'group',
+    'aria-label': 'Theatre visual',
+  });
+  const theatreStyleDefs: { style: TheatreStyle; label: string; iconName: IconName }[] = [
+    { style: 'wave', label: 'Wave', iconName: 'waves' },
+    { style: 'lava', label: 'Lava', iconName: 'flame' },
+  ];
+  for (const def of theatreStyleDefs) {
+    const btn = el(
+      'button',
+      {
+        class: 'theatre-style-btn',
+        'aria-label': `${def.label} visual`,
+        'aria-pressed': 'false',
+        title: `${def.label} visual`,
+        onclick: () => setTheatreStyle(def.style),
+      },
+      icon(def.iconName, 16),
+      el('span', { class: 'theatre-style-label' }, def.label),
+    ) as HTMLButtonElement;
+    theatreStyleButtons[def.style] = btn;
+    theatreStyleBar.append(btn);
+  }
+  const theatreLead = el('span', { class: 'theatre-lead' }, 'Solo sings');
   const theatreStage = el(
     'div',
     { class: 'theatre-stage', 'data-lead': 'artist' },
-    theatreYou.lane,
-    theatreSolo.lane,
+    theatreCanvas,
+    el(
+      'div',
+      { class: 'theatre-overlay theatre-overlay-top' },
+      el(
+        'span',
+        { class: 'theatre-kicker' },
+        icon('audioLines', 14),
+        el('span', {}, 'Theatre'),
+      ),
+      theatreStyleBar,
+    ),
+    el(
+      'div',
+      { class: 'theatre-overlay theatre-overlay-bottom' },
+      theatreLead,
+      el('span', { class: 'theatre-hint' }, 'V switches the visual'),
+    ),
   );
   const theatreView = el(
     'section',
@@ -308,8 +363,45 @@ function buildDom(context: RoomContext): RoomRefs {
     theatreStage,
   );
 
-  const studioYou = makeLane('you', 'You', 'mic');
-  const studioSolo = makeLane('solo', 'Solo', 'music');
+  const studioCanvas = el('canvas', {
+    class: 'studio-canvas',
+    'aria-hidden': 'true',
+  }) as HTMLCanvasElement;
+  const studioLines = [-2, -1, 0, 1, 2].map((offset) => {
+    const text = el('span', { class: 'studio-line-text' }, '');
+    const root = el('div', {
+      class: 'studio-line',
+      'data-offset': String(offset),
+      'aria-hidden': 'true',
+    }, text);
+    return { root, text, offset };
+  });
+  const studioLyricsHint = el('span', { class: 'studio-lyrics-hint' }, 'Live lyrics');
+  const studioPitchNote = el('strong', {}, '—');
+  const studioPitchTarget = el('span', {}, '—');
+  const studioPitchTune = el('span', { class: 'studio-tune' }, 'Start a take for the pitch guide');
+  const studioGuide = el(
+    'div',
+    { class: 'studio-guide' },
+    el(
+      'div',
+      { class: 'studio-guide-head' },
+      el(
+        'div',
+        { class: 'studio-guide-title' },
+        icon('audioLines', 15),
+        el('span', {}, 'Pitch guide'),
+      ),
+      el(
+        'div',
+        { class: 'studio-pitch-readout' },
+        el('span', { class: 'pitch-you' }, icon('mic', 13), studioPitchNote),
+        el('span', { class: 'pitch-song' }, icon('music', 13), studioPitchTarget),
+        studioPitchTune,
+      ),
+    ),
+    studioCanvas,
+  );
   const studioStatus = el(
     'span',
     { class: 'studio-status', role: 'status', 'aria-live': 'polite' },
@@ -348,7 +440,19 @@ function buildDom(context: RoomContext): RoomRefs {
   const studioStage = el(
     'div',
     { class: 'studio-stage', 'data-lead': 'artist' },
-    el('div', { class: 'studio-waves' }, studioYou.lane, studioSolo.lane),
+    el(
+      'div',
+      { class: 'studio-teleprompt' },
+      el(
+        'div',
+        { class: 'studio-lyrics-head' },
+        icon('captions', 14),
+        el('span', {}, 'Sing along'),
+        studioLyricsHint,
+      ),
+      el('div', { class: 'studio-lyrics' }, ...studioLines.map((line) => line.root)),
+    ),
+    studioGuide,
     el(
       'div',
       { class: 'studio-controls' },
@@ -358,7 +462,6 @@ function buildDom(context: RoomContext): RoomRefs {
       downloadRow,
     ),
     studioHint,
-    el('p', { class: 'studio-note' }, 'Mic + song, mixed as you hear it. Saved only on this device.'),
   );
   const studioView = el(
     'section',
@@ -593,25 +696,26 @@ function buildDom(context: RoomContext): RoomRefs {
     trackArtists.textContent = 'Waiting for the first song from Spotify…';
   }
 
-  // Visualisers read the live mic and, when a Studio take is running, the real
-  // tab audio. Without tab audio the Solo lane follows the duet's volume.
-  const visualizerOptions = {
+  // Theatre reads the live mic. The song lane uses the real tab-capture signal
+  // during a Studio take; otherwise a synthetic ribbon follows the duet level.
+  theatreVis = new TheatreVisualizer({
+    canvas: theatreCanvas,
     mic: { copy: (out: Float32Array) => store.mic?.copyWaveform(out) ?? false },
     music: { copy: (out: Float32Array) => recorder?.copyMusicWaveform(out) ?? false },
     micLevel: () => micLevel,
     musicLevel: () => musicVisualLevel(),
     playing: () => Boolean(playback && !playback.paused),
     lead: (): Lead => (store.duet?.lead === 'you' ? 'you' : 'artist'),
-  };
-  theatreVis = new DuetVisualizer({
-    micCanvas: theatreYou.canvas,
-    musicCanvas: theatreSolo.canvas,
-    ...visualizerOptions,
+    style: () => store.prefs.theatreStyle,
   });
-  studioVis = new DuetVisualizer({
-    micCanvas: studioYou.canvas,
-    musicCanvas: studioSolo.canvas,
-    ...visualizerOptions,
+  studioVis = new StudioVisualizer({
+    canvas: studioCanvas,
+    micPitch: () => store.mic?.pitch ?? null,
+    musicPitch: () => recorder?.musicPitch() ?? null,
+    micLevel: () => micLevel,
+    musicLevel: () => Math.min(1, (recorder?.musicRms() ?? 0) * 4),
+    recording: () => Boolean(recorder?.isRecording),
+    playing: () => Boolean(playback && !playback.paused),
   });
   theatreVis.start();
   studioVis.start();
@@ -648,7 +752,16 @@ function buildDom(context: RoomContext): RoomRefs {
     },
     viewButtons,
     theatreStage,
+    theatreCanvas,
+    theatreStyleButtons,
+    theatreLead,
     studioStage,
+    studioCanvas,
+    studioLines,
+    studioLyricsHint,
+    studioPitchNote,
+    studioPitchTarget,
+    studioPitchTune,
     studioStatus,
     studioTimer,
     studioHint,
@@ -681,26 +794,6 @@ function iconButton(
     },
     icon(iconName, 18),
   ) as HTMLButtonElement;
-}
-
-function makeLane(kind: 'you' | 'solo', label: string, iconName: IconName): Lane {
-  const canvas = el('canvas', {
-    class: 'wave-canvas',
-    'aria-hidden': 'true',
-  }) as HTMLCanvasElement;
-  const lane = el(
-    'div',
-    { class: `wave-lane wave-${kind}` },
-    el(
-      'div',
-      { class: 'lane-head' },
-      icon(iconName, 15),
-      el('span', { class: 'lane-name' }, label),
-      el('span', { class: 'lane-live', 'aria-hidden': 'true' }),
-    ),
-    el('div', { class: 'lane-wave' }, canvas),
-  );
-  return { lane, canvas };
 }
 
 function sliderGroup(
@@ -751,6 +844,7 @@ function buildHelpModal(): { modal: HTMLElement; closeBtn: HTMLButtonElement } {
     { keys: ['A'], label: 'Auto mode', iconName: 'radio' },
     { keys: ['M'], label: 'Manual mode', iconName: 'hand' },
     { keys: ['1', '2', '3'], label: 'Lyrical / Theatre / Studio', iconName: 'captions' },
+    { keys: ['V'], label: 'Switch the Theatre visual', iconName: 'waves' },
     { keys: ['R'], label: 'Start or stop a Studio take', iconName: 'record' },
     { keys: ['?'], label: 'Show shortcuts', iconName: 'keyboard' },
     { keys: ['Esc'], label: 'Close this panel', iconName: 'close' },
@@ -959,6 +1053,7 @@ function handlePlayerState(state: PlaybackState): void {
     lastActive = -2;
     lyrics = null;
     renderTrack(state.track);
+    resetStudioLyrics('Finding lyrics…', 'Searching');
     if (recorder && !recorder.isRecording) {
       recorder.setLabel(state.track.name, state.track.artists.map((a) => a.name));
     }
@@ -1045,6 +1140,7 @@ function setLyricsMessage(
 async function loadLyrics(track: SdkTrack, durationMs: number): Promise<void> {
   const token = ++lyricsToken;
   setLyricsMessage('Looking up lyrics…', null, 'search');
+  resetStudioLyrics('Finding lyrics…', 'Searching');
   try {
     const result = await fetchLyrics(
       track.name,
@@ -1073,6 +1169,7 @@ function renderLyrics(): void {
       'No words to follow — the duet still works.',
       'music',
     );
+    resetStudioLyrics('Instrumental track', 'Feel the melody');
     return;
   }
 
@@ -1088,6 +1185,7 @@ function renderLyrics(): void {
       el('div', { class: 'lyrics-scroll' }, ...lines.map((l) => l.root)),
     );
     updateStats();
+    updateStudioLyrics(Math.max(0, lastActive));
     return;
   }
 
@@ -1096,6 +1194,7 @@ function renderLyrics(): void {
   if (lyrics.plain) {
     const pre = el('div', { class: 'plain-lyrics' }, lyrics.plain.trim());
     refs.lyricsPanel.replaceChildren(pre);
+    updateStudioLyrics(-1);
     return;
   }
 
@@ -1104,6 +1203,115 @@ function renderLyrics(): void {
     'The duet still works — this version simply is not in the lyrics databases yet.',
     'captions',
   );
+  resetStudioLyrics('Lyrics unavailable', 'Follow the melody');
+}
+
+function resetStudioLyrics(title: string, hint: string): void {
+  if (!refs) return;
+  refs.studioLyricsHint.textContent = hint;
+  for (const line of refs.studioLines) {
+    line.text.textContent = '';
+    line.root.classList.remove('active', 'past', 'next', 'plain', 'message');
+    line.root.removeAttribute('title');
+    if (line.offset === 0) {
+      line.text.textContent = title;
+      line.root.classList.add('message');
+    }
+  }
+}
+
+function updateStudioLyrics(idx: number): void {
+  if (!refs) return;
+
+  const synced = lyrics?.synced;
+  if (!synced || !synced.length) {
+    const plainLines = lyrics?.plain
+      ?.split('\n')
+      .map((line) => line.trim())
+      .filter(Boolean)
+      .slice(0, refs.studioLines.length);
+    if (!plainLines?.length) return;
+
+    refs.studioLyricsHint.textContent = 'Not timed';
+    refs.studioLines.forEach((slot, i) => {
+      slot.text.textContent = plainLines[i] ?? '';
+      slot.root.classList.remove('active', 'past', 'next', 'message');
+      slot.root.classList.add('plain');
+      slot.root.removeAttribute('title');
+    });
+    return;
+  }
+
+  refs.studioLyricsHint.textContent = 'Live lyrics';
+  // Before the first timestamp, preview the opening line instead of leaving a
+  // blank teleprompter.
+  const center = idx >= 0 ? idx : 0;
+  for (const slot of refs.studioLines) {
+    const target = center + slot.offset;
+    const line = synced[target];
+    slot.text.textContent = line?.text || (line ? '♪' : '');
+    slot.root.classList.remove('plain', 'message');
+    slot.root.classList.toggle('active', slot.offset === 0 && Boolean(line));
+    slot.root.classList.toggle('past', slot.offset < 0);
+    slot.root.classList.toggle('next', slot.offset > 0);
+    slot.root.title = line?.text ?? '';
+  }
+}
+
+function updateStudioPitch(): void {
+  if (!refs || currentView !== 'studio') return;
+  const now = performance.now();
+  if (now - lastStudioPitchAt < 120) return;
+  lastStudioPitchAt = now;
+
+  const micHz = store.mic?.pitch ?? null;
+  const songHz = recorder?.musicPitch() ?? null;
+  const recording = Boolean(recorder?.isRecording);
+
+  refs.studioPitchNote.textContent = micHz ? noteName(micHz) : '—';
+  refs.studioPitchTarget.textContent = songHz ? noteName(songHz) : '—';
+  refs.studioPitchNote.title = micHz ? describePitch(micHz) : 'Waiting for your voice';
+  refs.studioPitchTarget.title = songHz
+    ? describePitch(songHz)
+    : recording
+      ? 'Listening to the shared song audio'
+      : 'The song guide appears while a take is running';
+
+  const tune = refs.studioPitchTune;
+  tune.classList.remove('in-tune', 'sharp', 'flat', 'waiting');
+  if (!micHz) {
+    tune.textContent = 'Listening…';
+    tune.classList.add('waiting');
+    tune.title = 'Sing a note and the live pitch appears here';
+    return;
+  }
+  if (!songHz) {
+    tune.textContent = recording ? 'Finding song note…' : 'Guide in takes';
+    tune.classList.add('waiting');
+    tune.title = recording
+      ? 'Waiting for a clear note from the shared tab audio'
+      : 'Record a take to compare your pitch with the song';
+    return;
+  }
+
+  let songMidi = midiFromHz(songHz);
+  const micMidi = midiFromHz(micHz);
+  while (songMidi - micMidi > 6) songMidi -= 12;
+  while (micMidi - songMidi > 6) songMidi += 12;
+  const cents = Math.round((micMidi - songMidi) * 100);
+  const absolute = Math.abs(cents);
+  tune.title = `${cents > 0 ? '+' : ''}${cents} cents from the song`;
+
+  if (absolute <= 45) {
+    tune.textContent = 'In tune';
+    tune.classList.add('in-tune');
+  } else if (absolute <= 90) {
+    tune.textContent = cents > 0 ? 'A little sharp' : 'A little flat';
+    tune.classList.add(cents > 0 ? 'sharp' : 'flat');
+  } else {
+    tune.textContent = cents > 0 ? 'Sharp ↑' : 'Flat ↓';
+    tune.classList.add(cents > 0 ? 'sharp' : 'flat');
+  }
 }
 
 /* ------------------------------------------------------------
@@ -1123,6 +1331,7 @@ function tick(): void {
   if (playback.duration > 0) {
     refs.progressFill.style.width = `${((position / playback.duration) * 100).toFixed(2)}%`;
   }
+  if (currentView === 'studio') updateStudioPitch();
 
   if (lyrics?.synced && lines.length) {
     const idx = activeLineIndex(lyrics.synced, position / 1000);
@@ -1155,6 +1364,7 @@ function applyActive(idx: number): void {
     line.root.classList.toggle('active', i === idx);
     line.root.classList.toggle('sung', i < idx);
   });
+  updateStudioLyrics(idx);
 
   if (idx >= 0 && !attributions.has(idx) && store.duet) {
     const lead = store.duet.lead;
@@ -1241,6 +1451,8 @@ function updateLead(): void {
   const you = store.duet?.lead === 'you';
   refs.theatreStage.dataset.lead = you ? 'you' : 'artist';
   refs.studioStage.dataset.lead = you ? 'you' : 'artist';
+  refs.theatreLead.textContent = you ? 'Your turn' : 'Solo sings';
+  refs.theatreLead.dataset.kind = you ? 'you' : 'artist';
   refs.holdBtn.setAttribute('aria-pressed', you ? 'true' : 'false');
 }
 
@@ -1281,10 +1493,22 @@ function setView(view: RoomView, opts?: { persist?: boolean }): void {
   }
   theatreVis?.setActive(view === 'theatre');
   studioVis?.setActive(view === 'studio');
+  if (view === 'studio') updateStudioPitch();
   if (opts?.persist !== false) {
     store.prefs.view = view;
     savePrefs(store.prefs);
   }
+}
+
+function setTheatreStyle(style: TheatreStyle, opts?: { persist?: boolean }): void {
+  if (!refs) return;
+  store.prefs.theatreStyle = style;
+  for (const key of ['wave', 'lava'] as TheatreStyle[]) {
+    const active = key === style;
+    refs.theatreStyleButtons[key].classList.toggle('active', active);
+    refs.theatreStyleButtons[key].setAttribute('aria-pressed', active ? 'true' : 'false');
+  }
+  if (opts?.persist !== false) savePrefs(store.prefs);
 }
 
 function toggleMixer(open?: boolean): void {
@@ -1461,6 +1685,17 @@ function applyRecorderStatus(status: RecorderStatus): void {
   if (phase === 'saved' && lastRecorderPhase !== 'saved') {
     toast('Studio take saved to your device.');
   }
+  if (phase === 'recording' && lastRecorderPhase !== 'recording') {
+    studioVis?.reset();
+    lastStudioPitchAt = 0;
+    updateStudioPitch();
+  } else if (lastRecorderPhase === 'recording' && phase !== 'recording') {
+    // Once the take ends there is no song reference any more. Clear the
+    // guide-relative ribbon rather than leaving an unanchored contour behind.
+    studioVis?.reset();
+    lastStudioPitchAt = 0;
+    updateStudioPitch();
+  }
   lastRecorderPhase = phase;
 }
 
@@ -1537,6 +1772,10 @@ function onKeyDown(e: KeyboardEvent): void {
     case 'KeyR':
       e.preventDefault();
       void toggleRecording();
+      break;
+    case 'KeyV':
+      e.preventDefault();
+      setTheatreStyle(store.prefs.theatreStyle === 'wave' ? 'lava' : 'wave');
       break;
     case 'Digit1':
     case 'Numpad1':
