@@ -18,7 +18,6 @@ export interface StudioVisualizerOptions {
   micLevel: () => number;
   musicLevel: () => number;
   recording: () => boolean;
-  playing: () => boolean;
 }
 
 const HISTORY = 180;
@@ -39,15 +38,12 @@ function clamp(v: number, min: number, max: number): number {
 export class StudioVisualizer {
   private raf = 0;
   private active = false;
-  private reduceMotion = false;
   private dpr = 1;
   private lastSample = 0;
-  private phase = 0;
 
   private micDev = new Float32Array(HISTORY).fill(Number.NaN);
   private micLevels = new Float32Array(HISTORY);
   private songLevels = new Float32Array(HISTORY);
-  private hasGuide = new Uint8Array(HISTORY);
   private head = 0;
 
   private resizeObserver: ResizeObserver | null = null;
@@ -56,7 +52,6 @@ export class StudioVisualizer {
 
   start(): void {
     if (this.raf) return;
-    this.reduceMotion = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
     if (typeof ResizeObserver !== 'undefined') {
       this.resizeObserver = new ResizeObserver(() => this.resize());
       this.resizeObserver.observe(this.opts.canvas);
@@ -85,7 +80,6 @@ export class StudioVisualizer {
     this.micDev.fill(Number.NaN);
     this.micLevels.fill(0);
     this.songLevels.fill(0);
-    this.hasGuide.fill(0);
     this.head = 0;
     this.lastSample = 0;
   }
@@ -111,8 +105,6 @@ export class StudioVisualizer {
     const canvas = this.opts.canvas;
     if (!canvas.isConnected || canvas.clientWidth < 2 || canvas.clientHeight < 2) return;
 
-    const dt = Math.min(64, now - (this.lastSample || now));
-    if (!this.reduceMotion) this.phase += dt / 1000;
     if (now - this.lastSample >= SAMPLE_MS) {
       this.sample(now);
     }
@@ -153,7 +145,6 @@ export class StudioVisualizer {
     this.micDev[this.head] = deviation;
     this.micLevels[this.head] = clamp(this.opts.micLevel(), 0, 1);
     this.songLevels[this.head] = clamp(this.opts.musicLevel(), 0, 1);
-    this.hasGuide[this.head] = guide ? 1 : 0;
   }
 
   private draw(ctx: CanvasRenderingContext2D, width: number, height: number): void {

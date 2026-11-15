@@ -715,7 +715,6 @@ function buildDom(context: RoomContext): RoomRefs {
     micLevel: () => micLevel,
     musicLevel: () => Math.min(1, (recorder?.musicRms() ?? 0) * 4),
     recording: () => Boolean(recorder?.isRecording),
-    playing: () => Boolean(playback && !playback.paused),
   });
   theatreVis.start();
   studioVis.start();
