@@ -6,11 +6,13 @@ up — a duet, solo.
 
 Two sources, both played by their official web players:
 
-- **YouTube** — free. Search and trending with your own Google Data API key.
-- **Spotify** — optional. Your playlists with your own Spotify app Client ID and
+- **YouTube** — free. Search and trending with a shared Google Data API key
+  supplied by the deployment, so visitors need no setup or account.
+- **Spotify** — optional. Your playlists with a shared Spotify app Client ID and
   a Premium account.
 
-No backend, no database, no secrets. Every key stays in your browser.
+No backend and no database. The Spotify Client ID is public by design (PKCE),
+and the YouTube key is shared from the build environment.
 
 ```
 ┌──────────────────────────────────────────────────────────┐
@@ -56,8 +58,10 @@ always sing *with* the record, and the record sings back when you rest.
 - **Node.js 20.19+ / 22+** for local development.
 - **A modern browser.** Chrome or Edge on desktop for Studio recording.
 - **YouTube mode:** a Google Cloud project with the YouTube Data API v3 enabled
-  and an API key. The free daily quota is 10,000 units; a search costs 100 and
-  trending costs 1.
+  and an API key. The deployment supplies one shared key so visitors need no
+  setup. The free daily quota is 10,000 units; a search costs 100 and trending
+  costs 1, so the shared key supports roughly 100 searches a day. For heavier
+  traffic, deploy a copy without a shared key so visitors can use their own.
 - **Spotify mode:** a Spotify developer app Client ID, your account on the app's
   User Management allowlist in Development Mode, and Spotify Premium for
   playback. No client secret is used.
@@ -72,17 +76,21 @@ npm run dev
 Open **http://127.0.0.1:5173**. Spotify only accepts loopback IP redirect URIs,
 so use `127.0.0.1` rather than `localhost` if you plan to connect Spotify.
 
-No environment variables are required. Each visitor brings their own keys. To
-offer a shared Spotify Client ID from this deployment, optionally run:
+No environment variables are required to run Solo. Without them, visitors use
+the bring-your-own-key setup. To offer shared, ready-to-use sources from this
+deployment, run:
 
 ```bash
 copy .env.example .env.local
-# then set VITE_SPOTIFY_CLIENT_ID=your-32-character-client-id
+# then set VITE_YOUTUBE_API_KEY=your-google-api-key
+# and/or VITE_SPOTIFY_CLIENT_ID=your-32-character-client-id
 ```
 
-`VITE_SPOTIFY_REDIRECT_URI` is only needed when the public URL differs from the
-browser's origin. Vite inlines these at build time. Never add a Spotify client
-secret.
+The YouTube key is inlined into the static bundle, so treat it as public and
+restrict it to your website and the YouTube Data API v3. Its free quota is
+shared by every visitor. `VITE_SPOTIFY_REDIRECT_URI` is only needed when the
+public URL differs from the browser's origin. Quote it in `.env.local` when the
+value contains `#`. Never add a Spotify client secret.
 
 ## Deploy on Vercel
 
@@ -96,25 +104,29 @@ Solo is a fully static SPA.
    works as an SPA route.
 
 Add the production redirect URI shown in Solo's Spotify setup screen to your
-Spotify app. YouTube keys need no deployment configuration: each visitor pastes
-their own.
+Spotify app. For a public launch, add `VITE_YOUTUBE_API_KEY` under **Settings →
+Environment Variables** (and optionally `VITE_SPOTIFY_CLIENT_ID`). Without the
+YouTube key, visitors see the bring-your-own-key setup instead.
 
 ## Keys and setup
 
 ### YouTube
 
-Open **YouTube → Add your YouTube key → How to get a key** in Solo. The full
-article is at `#/guides/youtube`. In short:
+Visitors need no key. Set `VITE_YOUTUBE_API_KEY` in `.env.local` or Vercel, and
+Solo shows the ready-to-use mode with no setup screen. The YouTube screen and
+the guide at `#/guides/youtube` then skip the key steps entirely.
 
-1. Create a project in [Google Cloud Console](https://console.cloud.google.com/).
-2. Enable **YouTube Data API v3**.
-3. Create an **API key** under Credentials.
-4. Restrict it to Websites (this site and `http://localhost:5173`) and to the
-   YouTube Data API v3.
-5. Paste it into Solo. It is stored in this browser only.
+The key is public in the static bundle. Restrict it in
+[Google Cloud Console](https://console.cloud.google.com/) to **Websites** (your
+production domain plus `http://localhost:5173`) and to **YouTube Data API v3**.
+Its free quota is shared by every visitor: about 100 searches a day, while the
+trending shelf costs far less thanks to a `videos.list` call at 1 unit.
 
-The key is sent directly to `googleapis.com`. Quota errors, disabled APIs and
-website restrictions produce friendly messages with a **Change key** action.
+Quota errors, disabled APIs and website restrictions produce friendly messages
+without asking visitors to change a key they never entered.
+
+For self-hosted copies without an env key, visitors can still open **YouTube →
+Add your YouTube key**. That key is then stored in their browser only.
 
 ### Spotify
 
@@ -244,7 +256,7 @@ src/
     auth.ts             Authorization Code + PKCE (S256), token refresh
     api.ts              Spotify Web API client
     sdk.ts              Web Playback SDK loader + Spotify SoloPlayer bridge
-    youtube.ts          YouTube Data API client + key storage
+    youtube.ts          YouTube Data API client, shared + browser keys
     youtube-player.ts   official IFrame player + SoloPlayer bridge
     playback.ts         shared player/source/queue types
     duet.ts             ducking engine (auto + manual modes)
@@ -280,9 +292,9 @@ src/
 
 | Symptom | Fix |
 | --- | --- |
-| YouTube says the API is disabled | Enable **YouTube Data API v3** in Google Cloud, wait a minute, then retry. |
-| YouTube key is rejected | Copy the whole key (usually starts with `AIza`). If it is restricted, allow this website and the YouTube Data API v3. |
-| YouTube quota exhausted | The key used its free daily quota. Wait for the reset or use another Google project/key. |
+| YouTube says the API is disabled | The deployment's Google key needs **YouTube Data API v3** enabled. Self-hosted visitors can use their own key instead. |
+| YouTube key is rejected or restricted | If you run this copy, allow this website and the YouTube Data API v3 on the key. Visitors with a shared key cannot fix this; the owner must. |
+| YouTube quota exhausted | The shared free quota for today is spent. Try again after the Pacific-time reset, or paste a personal key on a self-hosted copy. |
 | A video will not play | The owner disabled embedding. Solo skips it automatically; pick another result. |
 | Spotify `INVALID_CLIENT` / redirect mismatch | The dashboard redirect URI must match Solo's exactly, including scheme and no trailing slash. |
 | Spotify 403 / user not found | Add the account email under **User Management** in the Spotify app, and use a Premium account for playback. |

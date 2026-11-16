@@ -1,7 +1,8 @@
 // Shared playback types. Solo has two sources, both played by their official
 // web players:
 //
-//   • YouTube — the IFrame Player API, searched with a personal Data API key.
+//   • YouTube — the IFrame Player API, searched with a shared or personal Data
+//     API key.
 //   • Spotify — the Web Playback SDK, connected with a personal Client ID.
 //
 // Neither iframe exposes its audio to the Web Audio API, so the room controls

@@ -1,14 +1,18 @@
 // YouTube Data API v3 client for search and trending music.
 //
-// Solo is a static site, so the viewer brings their own Google API key. The key
-// is stored in this browser only and is sent to googleapis.com — never to Solo.
-// Playback uses the official YouTube IFrame Player (see youtube-player.ts).
+// A deployment can share one Google API key through VITE_YOUTUBE_API_KEY, so
+// visitors search without any setup. The key is public (it ships in the static
+// bundle) and the free quota is shared by everyone using that deployment. When
+// no shared key exists, Solo falls back to a key stored in this browser for
+// local development and self-hosted copies. Playback uses the official YouTube
+// IFrame Player (see youtube-player.ts).
 
 import type { YouTubeTrack } from './playback';
 
 const KEY_STORAGE = 'solo.youtubeKey';
 const KEY_PREFIX = 'AIza';
 const API = 'https://www.googleapis.com/youtube/v3';
+const ENV_KEY = (import.meta.env.VITE_YOUTUBE_API_KEY ?? '').trim();
 
 export class YouTubeApiError extends Error {
   readonly status: number;
@@ -22,13 +26,26 @@ export class YouTubeApiError extends Error {
   }
 }
 
-export function getYouTubeKey(): string | null {
+/** The shared key compiled into this deployment, if one is configured. */
+export function deploymentYouTubeKey(): string | null {
+  return looksLikeYouTubeKey(ENV_KEY) ? ENV_KEY : null;
+}
+
+export function hasDeploymentYouTubeKey(): boolean {
+  return Boolean(deploymentYouTubeKey());
+}
+
+function storedYouTubeKey(): string | null {
   try {
     const key = localStorage.getItem(KEY_STORAGE)?.trim() ?? '';
     return key ? key : null;
   } catch {
     return null;
   }
+}
+
+export function getYouTubeKey(): string | null {
+  return deploymentYouTubeKey() ?? storedYouTubeKey();
 }
 
 export function hasYouTubeKey(): boolean {
@@ -75,14 +92,17 @@ interface VideoItem {
 function friendlyError(status: number, payload: ApiErrorPayload): YouTubeApiError {
   const reason = payload.error?.errors?.[0]?.reason ?? '';
   const raw = payload.error?.message ?? '';
+  const shared = hasDeploymentYouTubeKey();
 
   if (
     status === 400 &&
     (reason === 'keyInvalid' || reason === 'API_KEY_INVALID' || /api key not valid/i.test(raw))
   ) {
     return new YouTubeApiError(
-      'Google rejected that API key. Copy the whole key from Google Cloud and try again.',
-      400,
+      shared
+        ? 'YouTube is temporarily unavailable. Try again in a moment.'
+        : 'Google rejected that API key. Copy the whole key from Google Cloud and try again.',
+      status,
       reason,
     );
   }
@@ -91,7 +111,9 @@ function friendlyError(status: number, payload: ApiErrorPayload): YouTubeApiErro
     /has not been used|is disabled|not enabled/i.test(raw)
   ) {
     return new YouTubeApiError(
-      'YouTube Data API v3 is not enabled for this key. Enable it in Google Cloud, then try again.',
+      shared
+        ? 'YouTube is temporarily unavailable. Try again in a moment.'
+        : 'YouTube Data API v3 is not enabled for this key. Enable it in Google Cloud, then try again.',
       status,
       reason,
     );
@@ -102,7 +124,9 @@ function friendlyError(status: number, payload: ApiErrorPayload): YouTubeApiErro
     /quota/i.test(raw)
   ) {
     return new YouTubeApiError(
-      'This key has used its free daily YouTube quota. Wait for the quota to reset, or use another key.',
+      shared
+        ? 'The shared free YouTube search is used up for today. Try again tomorrow.'
+        : 'This key has used its free daily YouTube quota. Wait for the quota to reset, or use another key.',
       status,
       reason,
     );
@@ -113,20 +137,30 @@ function friendlyError(status: number, payload: ApiErrorPayload): YouTubeApiErro
     /referer|referrer|restricted/i.test(raw)
   ) {
     return new YouTubeApiError(
-      'This key is restricted to another website. Add this site’s address to the key’s website restrictions in Google Cloud.',
+      shared
+        ? 'YouTube is temporarily unavailable from this address. Try again later.'
+        : 'This key is restricted to another website. Add this site’s address to the key’s website restrictions in Google Cloud.',
       status,
       reason,
     );
   }
   if (status === 403) {
     return new YouTubeApiError(
-      raw || 'YouTube refused the request. Check the key’s API and website restrictions.',
+      shared
+        ? 'YouTube is temporarily unavailable. Try again in a moment.'
+        : raw || 'YouTube refused the request. Check the key’s API and website restrictions.',
       status,
       reason,
     );
   }
   if (status === 429) {
-    return new YouTubeApiError('YouTube is rate-limiting this key. Try again in a moment.', status, reason);
+    return new YouTubeApiError(
+      shared
+        ? 'YouTube is taking a short break. Try again in a moment.'
+        : 'YouTube is rate-limiting this key. Try again in a moment.',
+      status,
+      reason,
+    );
   }
   return new YouTubeApiError(raw || 'YouTube could not complete the request. Try again.', status, reason);
 }

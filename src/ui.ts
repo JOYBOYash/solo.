@@ -31,6 +31,7 @@ import { PlayerBridge } from './lib/sdk';
 import {
   clearYouTubeKey,
   getYouTubeKey,
+  hasDeploymentYouTubeKey,
   hasYouTubeKey,
   looksLikeYouTubeKey,
   searchYouTube,
@@ -205,6 +206,7 @@ export function goHome(): void {
 export function renderHome(): void {
   document.title = 'Solo — sing with any song';
   const ytReady = hasYouTubeKey();
+  const ytShared = hasDeploymentYouTubeKey();
   const spotifyReady = Boolean(getClientId() ?? (hasDeploymentClientId() ? 'deployment' : ''));
   const spotifyConnected = isLoggedIn();
 
@@ -231,9 +233,9 @@ export function renderHome(): void {
           { class: 'm-source-grid' },
           homeSourceCard({
             source: 'youtube',
-            tag: ytReady ? 'Key saved' : 'Free · your key',
+            tag: ytShared ? 'Free · ready' : ytReady ? 'Key saved' : 'Free · your key',
             title: 'YouTube',
-            meta: ytReady ? 'Trending & search' : '2-minute setup',
+            meta: ytShared ? 'No sign-in' : ytReady ? 'Trending & search' : '2-minute setup',
             iconName: 'youtube',
             onClick: () => goYouTube(),
           }),
@@ -241,7 +243,7 @@ export function renderHome(): void {
             source: 'spotify',
             tag: spotifyConnected ? 'Connected' : spotifyReady ? 'Premium · ready' : 'Premium · your app',
             title: 'Spotify',
-            meta: spotifyConnected ? 'Your playlists' : 'Connect your app',
+            meta: spotifyConnected ? 'Your playlists' : spotifyReady ? 'Connect Spotify' : '2-minute setup',
             iconName: 'spotify',
             onClick: () => (spotifyConnected ? void goLibrary() : renderConnectScreen()),
           }),
@@ -323,7 +325,7 @@ function homeSourceCard(opts: {
 }
 
 /* ------------------------------------------------------------
-   YouTube — free mode with a personal Data API key
+   YouTube — free mode with a shared or personal Data API key
    ------------------------------------------------------------ */
 
 let ytTrending: YouTubeTrack[] = [];
@@ -359,6 +361,8 @@ export function goYouTube(): void {
 function renderYouTubeScreen(): void {
   document.title = 'YouTube — Solo';
   const hasKey = hasYouTubeKey();
+  const sharedKey = hasDeploymentYouTubeKey();
+  const canChangeKey = hasKey && !ytEditingKey && !sharedKey;
   const content = el(
     'main',
     { class: 'page m-page' },
@@ -381,7 +385,7 @@ function renderYouTubeScreen(): void {
           el('span', { class: 'm-kicker' }, 'Free mode'),
           el('h2', {}, 'YouTube'),
         ),
-        hasKey && !ytEditingKey
+        canChangeKey
           ? el(
               'button',
               {
@@ -453,7 +457,9 @@ function renderYouTubeScreen(): void {
         ? el(
             'p',
             { class: 'm-attrib' },
-            'Music and thumbnails from YouTube. Searches use your Google quota.',
+            sharedKey
+              ? 'Music and thumbnails from YouTube.'
+              : 'Music and thumbnails from YouTube. Searches use your Google quota.',
           )
         : null,
     ),
@@ -504,7 +510,7 @@ function youtubeSetupCard(): HTMLElement {
     el(
       'div',
       { class: 'm-setup-head' },
-      el('span', { class: 'm-setup-icon' }, icon('key', 24)),
+      el('span', { class: 'm-setup-icon' }, icon('key', 26)),
       el(
         'div',
         {},
@@ -688,18 +694,20 @@ function refreshYouTubeResults(): void {
             icon('refresh', 16),
             el('span', {}, 'Try again'),
           ),
-          el(
-            'button',
-            {
-              class: 'btn',
-              onclick: () => {
-                ytEditingKey = true;
-                renderYouTubeScreen();
-              },
-            },
-            icon('key', 16),
-            el('span', {}, 'Change key'),
-          ),
+          hasDeploymentYouTubeKey()
+            ? null
+            : el(
+                'button',
+                {
+                  class: 'btn',
+                  onclick: () => {
+                    ytEditingKey = true;
+                    renderYouTubeScreen();
+                  },
+                },
+                icon('key', 16),
+                el('span', {}, 'Change key'),
+              ),
         ),
       ),
     );
@@ -925,7 +933,7 @@ function spotifySetupCard(deploymentId: boolean): HTMLElement {
     el(
       'div',
       { class: 'm-setup-head' },
-      el('span', { class: 'm-setup-icon spotify' }, icon('key', 24)),
+      el('span', { class: 'm-setup-icon spotify' }, icon('key', 26)),
       el(
         'div',
         {},
@@ -1799,6 +1807,41 @@ const GUIDES: Record<GuideSlug, Guide> = {
   },
 };
 
+const SHARED_YOUTUBE_GUIDE: Guide = {
+  slug: 'youtube',
+  icon: 'youtube',
+  kicker: 'Free mode',
+  title: 'Sing with YouTube',
+  lede: 'YouTube is already set up. Search any song or start from trending — no key, no account.',
+  steps: [
+    {
+      icon: 'search',
+      title: 'Pick a song',
+      body: 'Open YouTube and search by song, artist or video. The trending shelf is the fastest start.',
+    },
+    {
+      icon: 'play',
+      title: 'Sing',
+      body: 'Pick a video to enter the room. Solo plays the official YouTube player and follows your voice.',
+    },
+    {
+      icon: 'record',
+      title: 'Record a take',
+      body: 'On desktop Chrome or Edge, open Studio and press Record. Choose “This tab” and share tab audio.',
+    },
+  ],
+  notes: [
+    'Search is shared by everyone using this copy of Solo. The free Google quota allows roughly 100 searches a day; trending costs much less.',
+    'Some videos cannot be embedded. Solo detects this and moves to the next song automatically.',
+    'YouTube and Spotify both play through protected players, so Studio records tab audio.',
+  ],
+  cta: { label: 'Open YouTube', action: () => goYouTube() },
+};
+
+function guideFor(slug: GuideSlug): Guide {
+  return slug === 'youtube' && hasDeploymentYouTubeKey() ? SHARED_YOUTUBE_GUIDE : GUIDES[slug];
+}
+
 function isGuideSlug(value: string | undefined): value is GuideSlug {
   return value === 'youtube' || value === 'spotify' || value === 'recording';
 }
@@ -1857,7 +1900,7 @@ function renderGuidesIndex(): void {
         'div',
         { class: 'm-guide-grid' },
         ...order.map((slug) => {
-          const guide = GUIDES[slug];
+          const guide = guideFor(slug);
           return el(
             'button',
             {
@@ -1865,7 +1908,7 @@ function renderGuidesIndex(): void {
               'data-source': slug,
               onclick: () => goGuides(slug),
             },
-            el('span', { class: 'm-guide-card-icon' }, icon(guide.icon, 28)),
+            el('span', { class: 'm-guide-card-icon' }, icon(guide.icon, 32)),
             el('span', { class: 'm-guide-card-kicker' }, guide.kicker),
             el('strong', {}, guide.title),
             el('span', { class: 'm-guide-card-meta' }, `${guide.steps.length} steps`),
@@ -1880,7 +1923,7 @@ function renderGuidesIndex(): void {
 }
 
 function renderGuidePage(slug: GuideSlug): void {
-  const guide = GUIDES[slug];
+  const guide = guideFor(slug);
   document.title = `${guide.title} — Solo`;
   const content = el(
     'main',
@@ -1897,7 +1940,7 @@ function renderGuidePage(slug: GuideSlug): void {
       el(
         'header',
         { class: 'm-article-head', 'data-source': slug },
-        el('span', { class: 'm-article-icon' }, icon(guide.icon, 34)),
+        el('span', { class: 'm-article-icon' }, icon(guide.icon, 36)),
         el('span', { class: 'm-kicker' }, guide.kicker),
         el('h1', {}, guide.title),
         el('p', { class: 'm-article-lede' }, guide.lede),
@@ -1960,7 +2003,7 @@ function renderGuidePage(slug: GuideSlug): void {
 }
 
 function openGuideModal(slug: 'youtube' | 'spotify'): void {
-  const guide = GUIDES[slug];
+  const guide = guideFor(slug);
   let close = (): void => {};
 
   const overlay = el('div', {
@@ -1989,7 +2032,7 @@ function openGuideModal(slug: 'youtube' | 'spotify'): void {
       el(
         'div',
         { class: 'm-modal-title' },
-        el('span', { class: 'm-modal-icon' }, icon(guide.icon, 22)),
+        el('span', { class: 'm-modal-icon' }, icon(guide.icon, 26)),
         el(
           'div',
           {},

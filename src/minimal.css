@@ -35,7 +35,6 @@
   width: 64px;
   height: 64px;
   margin-bottom: 26px;
-  filter: drop-shadow(0 14px 32px rgba(30, 215, 96, 0.25));
 }
 
 .m-hero h1 {
@@ -85,14 +84,14 @@
 
 .m-source-card[data-source='youtube'] {
   background:
-    radial-gradient(120% 120% at 100% 0%, rgba(255, 45, 85, 0.34) 0%, rgba(255, 45, 85, 0.06) 44%, transparent 68%),
-    linear-gradient(150deg, #2a0a12 0%, #171717 54%, #121212 100%);
+    radial-gradient(85% 95% at 100% 0%, rgba(255, 45, 85, 0.21) 0%, rgba(255, 45, 85, 0.04) 48%, transparent 64%),
+    linear-gradient(150deg, #20080e 0%, #161616 54%, #121212 100%);
 }
 
 .m-source-card[data-source='spotify'] {
   background:
-    radial-gradient(120% 120% at 100% 0%, rgba(30, 215, 96, 0.3) 0%, rgba(30, 215, 96, 0.06) 44%, transparent 68%),
-    linear-gradient(150deg, #062415 0%, #141a16 54%, #121212 100%);
+    radial-gradient(85% 95% at 100% 0%, rgba(30, 215, 96, 0.19) 0%, rgba(30, 215, 96, 0.04) 48%, transparent 64%),
+    linear-gradient(150deg, #051c11 0%, #141a16 54%, #121212 100%);
 }
 
 .m-source-card:hover {
@@ -104,13 +103,13 @@
 .m-source-glow {
   position: absolute;
   z-index: -1;
-  width: 230px;
-  height: 230px;
-  right: -70px;
-  top: -80px;
+  width: 170px;
+  height: 170px;
+  right: -46px;
+  top: -56px;
   border-radius: 50%;
-  filter: blur(48px);
-  opacity: 0.5;
+  filter: blur(22px);
+  opacity: 0.28;
   background: var(--yt);
 }
 
@@ -140,14 +139,11 @@
 }
 
 .m-source-icon {
-  width: 58px;
-  height: 58px;
+  width: 36px;
+  height: 36px;
   margin-top: 26px;
   display: grid;
   place-items: center;
-  border-radius: 17px;
-  background: rgba(255, 255, 255, 0.09);
-  border: 1px solid rgba(255, 255, 255, 0.13);
   color: #fff;
 }
 
@@ -177,20 +173,15 @@
   position: absolute;
   right: 22px;
   bottom: 22px;
-  width: 38px;
-  height: 38px;
   display: grid;
   place-items: center;
-  border-radius: 50%;
-  background: rgba(255, 255, 255, 0.1);
-  color: #fff;
-  transition: background 0.2s ease, transform 0.2s ease;
+  color: rgba(255, 255, 255, 0.72);
+  transition: color 0.2s ease, transform 0.2s ease;
 }
 
 .m-source-card:hover .m-source-arrow {
-  background: #fff;
-  color: #000;
-  transform: translateX(2px);
+  color: #fff;
+  transform: translateX(3px);
 }
 
 .m-home-lower {
@@ -223,12 +214,8 @@
 }
 
 .m-step-icon {
-  width: 28px;
-  height: 28px;
   display: grid;
   place-items: center;
-  border-radius: 50%;
-  background: rgba(255, 255, 255, 0.07);
   color: var(--fg);
 }
 
@@ -309,31 +296,21 @@
 }
 
 .m-title-icon {
-  width: 58px;
-  height: 58px;
   display: grid;
   place-items: center;
-  border-radius: 17px;
-  border: 1px solid var(--m-line);
-  background: var(--m-surface);
+  flex-shrink: 0;
 }
 
 .m-title-icon[data-source='youtube'] {
   color: #ff5c78;
-  background: rgba(255, 45, 85, 0.1);
-  border-color: rgba(255, 45, 85, 0.24);
 }
 
 .m-title-icon[data-source='spotify'] {
   color: var(--spot);
-  background: rgba(30, 215, 96, 0.09);
-  border-color: rgba(30, 215, 96, 0.22);
 }
 
 .m-title-icon[data-source='guide'] {
   color: var(--guide);
-  background: rgba(167, 139, 250, 0.1);
-  border-color: rgba(167, 139, 250, 0.22);
 }
 
 .m-title-text {
@@ -529,21 +506,14 @@
 }
 
 .m-setup-icon {
-  width: 52px;
-  height: 52px;
   display: grid;
   place-items: center;
-  border-radius: 15px;
   color: #ffd166;
-  background: rgba(255, 209, 102, 0.09);
-  border: 1px solid rgba(255, 209, 102, 0.18);
   flex-shrink: 0;
 }
 
 .m-setup-icon.spotify {
   color: var(--spot);
-  background: rgba(30, 215, 96, 0.09);
-  border-color: rgba(30, 215, 96, 0.2);
 }
 
 .m-setup-head h3 {
@@ -625,7 +595,7 @@
   border-radius: 22px;
   border: 1px solid rgba(30, 215, 96, 0.22);
   background:
-    radial-gradient(100% 140% at 100% 0%, rgba(30, 215, 96, 0.12) 0%, transparent 60%),
+    radial-gradient(100% 140% at 100% 0%, rgba(30, 215, 96, 0.08) 0%, transparent 60%),
     var(--m-surface);
   display: grid;
   grid-template-columns: auto 1fr;
@@ -634,13 +604,9 @@
 }
 
 .m-connect-icon {
-  width: 46px;
-  height: 46px;
   display: grid;
   place-items: center;
-  border-radius: 50%;
-  color: #06140b;
-  background: var(--spot);
+  color: var(--spot);
 }
 
 .m-connect-copy h3 {
@@ -766,11 +732,8 @@
 .m-video-play .icon {
   width: 44px;
   height: 44px;
-  padding: 12px;
-  border-radius: 50%;
-  background: rgba(255, 255, 255, 0.92);
-  color: #000;
-  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.35);
+  color: #fff;
+  filter: drop-shadow(0 2px 10px rgba(0, 0, 0, 0.7));
 }
 
 .m-video-card:hover .m-video-play,
@@ -988,13 +951,13 @@
 .m-guide-card::after {
   content: '';
   position: absolute;
-  width: 150px;
-  height: 150px;
-  right: -50px;
-  top: -50px;
+  width: 110px;
+  height: 110px;
+  right: -38px;
+  top: -38px;
   border-radius: 50%;
-  filter: blur(36px);
-  opacity: 0.32;
+  filter: blur(16px);
+  opacity: 0.2;
   background: var(--guide);
 }
 
@@ -1013,27 +976,18 @@
 }
 
 .m-guide-card-icon {
-  width: 48px;
-  height: 48px;
   display: grid;
   place-items: center;
-  border-radius: 14px;
-  background: rgba(167, 139, 250, 0.1);
-  border: 1px solid rgba(167, 139, 250, 0.2);
   color: var(--guide);
-  margin-bottom: 22px;
+  margin-bottom: 20px;
 }
 
 .m-guide-card[data-source='youtube'] .m-guide-card-icon {
   color: #ff5c78;
-  background: rgba(255, 45, 85, 0.1);
-  border-color: rgba(255, 45, 85, 0.22);
 }
 
 .m-guide-card[data-source='spotify'] .m-guide-card-icon {
   color: var(--spot);
-  background: rgba(30, 215, 96, 0.09);
-  border-color: rgba(30, 215, 96, 0.2);
 }
 
 .m-guide-card-kicker {
@@ -1077,33 +1031,22 @@
 }
 
 .m-article-icon {
-  width: 62px;
-  height: 62px;
   display: grid;
   place-items: center;
-  border-radius: 18px;
-  margin-bottom: 22px;
+  margin-bottom: 18px;
   color: var(--guide);
-  background: rgba(167, 139, 250, 0.1);
-  border: 1px solid rgba(167, 139, 250, 0.22);
 }
 
 .m-article-head[data-source='youtube'] .m-article-icon {
   color: #ff5c78;
-  background: rgba(255, 45, 85, 0.1);
-  border-color: rgba(255, 45, 85, 0.24);
 }
 
 .m-article-head[data-source='spotify'] .m-article-icon {
   color: var(--spot);
-  background: rgba(30, 215, 96, 0.09);
-  border-color: rgba(30, 215, 96, 0.22);
 }
 
 .m-article-head[data-source='recording'] .m-article-icon {
   color: #ff9f6e;
-  background: rgba(255, 159, 110, 0.1);
-  border-color: rgba(255, 159, 110, 0.22);
 }
 
 .m-article-head h1 {
@@ -1252,8 +1195,8 @@
   padding: 20px;
   display: grid;
   place-items: center;
-  background: rgba(0, 0, 0, 0.72);
-  backdrop-filter: blur(8px);
+  background: rgba(0, 0, 0, 0.78);
+  backdrop-filter: blur(5px);
   animation: m-fade 0.18s ease;
 }
 
@@ -1290,21 +1233,14 @@
 }
 
 .m-modal-icon {
-  width: 48px;
-  height: 48px;
   display: grid;
   place-items: center;
-  border-radius: 14px;
   color: #ff5c78;
-  background: rgba(255, 45, 85, 0.1);
-  border: 1px solid rgba(255, 45, 85, 0.22);
   flex-shrink: 0;
 }
 
 .m-modal-card[data-source='spotify'] .m-modal-icon {
   color: var(--spot);
-  background: rgba(30, 215, 96, 0.09);
-  border-color: rgba(30, 215, 96, 0.22);
 }
 
 .m-modal-steps {
@@ -1383,15 +1319,10 @@
 }
 
 .m-state-icon {
-  width: 62px;
-  height: 62px;
   display: grid;
   place-items: center;
-  margin-bottom: 6px;
-  border-radius: 50%;
-  background: var(--m-surface);
-  border: 1px solid var(--m-line);
-  color: var(--fg-muted);
+  margin-bottom: 4px;
+  color: var(--fg-faint);
 }
 
 .m-state h3 {
@@ -1596,10 +1527,7 @@
   }
 
   .m-source-icon {
-    width: 50px;
-    height: 50px;
     margin-top: 18px;
-    border-radius: 15px;
   }
 
   .m-source-title {
@@ -1619,11 +1547,6 @@
     gap: 6px;
   }
 
-  .m-step-icon {
-    width: 24px;
-    height: 24px;
-  }
-
   .m-step-icon .icon {
     width: 15px;
     height: 15px;
@@ -1637,12 +1560,6 @@
   .m-page-head,
   .m-article-inner {
     padding-top: 88px;
-  }
-
-  .m-title-icon {
-    width: 50px;
-    height: 50px;
-    border-radius: 15px;
   }
 
   .m-title-row {
@@ -1701,7 +1618,6 @@
   .m-video-play .icon {
     width: 38px;
     height: 38px;
-    padding: 10px;
   }
 
   .m-playlist-grid {
