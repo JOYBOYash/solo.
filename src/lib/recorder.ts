@@ -1,15 +1,18 @@
-// Studio recorder: captures the singer's microphone and the Spotify tab's audio
-// into a single mixed take, then saves it to the device.
+// Studio recorder: captures the singer's microphone and the song into a single
+// mixed take, then saves it to the device.
 //
-// The Spotify Web Playback SDK renders audio inside a cross-origin DRM iframe,
-// so its stream cannot be tapped directly. `getDisplayMedia` with tab audio is
-// the only browser-supported way to include the song. Chrome/Edge on desktop
-// can capture "This tab" audio; the user must switch on "Share tab audio".
+// There are two song sources:
+//   • Spotify — its Web Playback SDK renders audio inside a cross-origin DRM
+//     iframe, so `getDisplayMedia` with tab audio is the only supported way to
+//     include the song. Chrome/Edge on desktop can capture "This tab".
+//   • Audius / local files — InlinePlayer exposes its Web Audio graph as a
+//     MediaStream, so the song can be recorded directly, no tab picker needed.
 //
-// The mix is built with Web Audio (mic + tab -> MediaStreamDestination) and
+// The mix is built with Web Audio (mic + song -> MediaStreamDestination) and
 // encoded with MediaRecorder. No audio is ever uploaded anywhere.
 
 import { detectPitch } from './mic';
+import type { MusicSource } from './playback';
 
 export type RecorderPhase =
   | 'idle'
@@ -34,12 +37,27 @@ export interface RecorderStatus {
   message?: string;
 }
 
+export interface RecorderOptions {
+  /** Song audio from InlinePlayer. When present, no tab picker is shown. */
+  musicStream?: MediaStream | null;
+  /** InlinePlayer's analyser, so pitch keeps working without a second tap. */
+  musicAnalyser?: AnalyserNode | null;
+}
+
+/** Base support: MediaRecorder is enough for Audius and local files. */
 export function recorderSupported(): boolean {
   return (
     typeof window !== 'undefined' &&
     typeof MediaRecorder !== 'undefined' &&
-    !!navigator.mediaDevices?.getDisplayMedia
+    typeof AudioContext !== 'undefined'
   );
+}
+
+/** Spotify audio still needs desktop tab capture; inline sources do not. */
+export function canRecordSource(source: MusicSource): boolean {
+  if (!recorderSupported()) return false;
+  if (source === 'spotify') return !!navigator.mediaDevices?.getDisplayMedia;
+  return true;
 }
 
 const MIME_CANDIDATES = [
@@ -155,7 +173,7 @@ export class StudioRecorder {
     this.label = safeFilename(artist ? `${title} - ${artist}` : title);
   }
 
-  async start(micStream: MediaStream, label?: string): Promise<void> {
+  async start(micStream: MediaStream, opts?: RecorderOptions): Promise<void> {
     if (this.disposed) throw new Error('This Studio session is closed.');
     if (
       this.phaseValue === 'requesting' ||
@@ -164,7 +182,6 @@ export class StudioRecorder {
     ) {
       return;
     }
-    if (label) this.label = safeFilename(label);
     if (
       !micStream ||
       !micStream.getAudioTracks().some((track) => track.readyState === 'live')
@@ -177,33 +194,37 @@ export class StudioRecorder {
     this.phaseValue = 'requesting';
     this.emit();
 
+    const inlineMusic = opts?.musicStream ?? null;
     let display: MediaStream | null = null;
-    try {
-      display = await navigator.mediaDevices.getDisplayMedia({
-        video: true,
-        audio: true,
-        preferCurrentTab: true,
-        selfBrowserSurface: 'include',
-        surfaceSwitching: 'exclude',
-        systemAudio: 'include',
-      } as DisplayMediaStreamOptions);
-    } catch (err) {
-      this.errorMessage = describeDisplayError(err);
-      this.phaseValue = 'error';
-      this.emit();
-      throw new Error(this.errorMessage);
+
+    if (!inlineMusic) {
+      try {
+        display = await navigator.mediaDevices.getDisplayMedia({
+          video: true,
+          audio: true,
+          preferCurrentTab: true,
+          selfBrowserSurface: 'include',
+          surfaceSwitching: 'exclude',
+          systemAudio: 'include',
+        } as DisplayMediaStreamOptions);
+      } catch (err) {
+        this.errorMessage = describeDisplayError(err);
+        this.phaseValue = 'error';
+        this.emit();
+        throw new Error(this.errorMessage);
+      }
     }
 
     if (this.disposed || this.cancelAfterStart) {
-      display.getTracks().forEach((track) => track.stop());
+      display?.getTracks().forEach((track) => track.stop());
       this.teardown();
       this.phaseValue = 'idle';
       this.emit();
       return;
     }
 
-    if (!display.getAudioTracks().length) {
-      display.getTracks().forEach((track) => track.stop());
+    if (!inlineMusic && !display?.getAudioTracks().length) {
+      display?.getTracks().forEach((track) => track.stop());
       this.teardown();
       this.errorMessage =
         'No song audio was shared. Pick “This tab” and switch on “Share tab audio”.';
@@ -212,6 +233,8 @@ export class StudioRecorder {
       throw new Error(this.errorMessage);
     }
 
+    // Only a tab capture is owned by the recorder. Inline song streams belong
+    // to the player and must stay alive after the take ends.
     this.displayStream = display;
     this.chunks = [];
     this.finalized = false;
@@ -229,14 +252,19 @@ export class StudioRecorder {
       const micGain = ctx.createGain();
       micGain.gain.value = 1;
 
-      const tabStream = new MediaStream(display.getAudioTracks());
-      const tabSource = ctx.createMediaStreamSource(tabStream);
-      const tabGain = ctx.createGain();
-      tabGain.gain.value = 1;
+      const songStream = inlineMusic ?? new MediaStream(display!.getAudioTracks());
+      const songSource = ctx.createMediaStreamSource(songStream);
+      const songGain = ctx.createGain();
+      songGain.gain.value = 1;
 
-      const analyser = ctx.createAnalyser();
-      analyser.fftSize = 2048;
-      analyser.smoothingTimeConstant = 0.6;
+      // Prefer the player's analyser for inline audio so the pitch guide and
+      // the take read exactly the same signal the singer hears.
+      let analyser = opts?.musicAnalyser ?? null;
+      if (!analyser) {
+        analyser = ctx.createAnalyser();
+        analyser.fftSize = 2048;
+        analyser.smoothingTimeConstant = 0.6;
+      }
       this.musicAnalyser = analyser;
       this.musicBuf = new Float32Array(analyser.fftSize);
 
@@ -249,9 +277,9 @@ export class StudioRecorder {
       limiter.attack.value = 0.003;
       limiter.release.value = 0.25;
 
-      tabSource.connect(tabGain);
-      tabGain.connect(analyser);
-      tabGain.connect(limiter);
+      songSource.connect(songGain);
+      if (!opts?.musicAnalyser) songGain.connect(analyser);
+      songGain.connect(limiter);
       micSource.connect(micGain);
       micGain.connect(limiter);
       limiter.connect(destination);
@@ -293,8 +321,8 @@ export class StudioRecorder {
         if (this.phaseValue === 'recording') this.emit();
       }, 250);
 
-      const video = display.getVideoTracks()[0];
-      const audio = display.getAudioTracks()[0];
+      const video = display?.getVideoTracks()[0];
+      const audio = display?.getAudioTracks()[0];
       video?.addEventListener('ended', () => this.shareEnded());
       audio?.addEventListener('ended', () => this.shareEnded());
     } catch (err) {
@@ -386,7 +414,7 @@ export class StudioRecorder {
    * by the recorder).
    */
   musicPitch(): number | null {
-    if (!this.musicAnalyser || !this.ctx) return null;
+    if (!this.musicAnalyser) return null;
     const now = performance.now();
     if (now - this.lastMusicPitchAt < 90) return this.lastMusicPitch;
     this.lastMusicPitchAt = now;
@@ -396,7 +424,7 @@ export class StudioRecorder {
     const rms = Math.sqrt(sum / this.musicBuf.length);
     this.lastMusicPitch =
       rms > 0.002
-        ? detectPitch(this.musicBuf, this.ctx.sampleRate, 0.0015, 0.42)
+        ? detectPitch(this.musicBuf, this.musicAnalyser.context.sampleRate, 0.0015, 0.42)
         : null;
     return this.lastMusicPitch;
   }
@@ -468,7 +496,7 @@ export class StudioRecorder {
       if (this.downloadOnFinish) autoDownload(result);
     } else {
       this.errorMessage =
-        failed || 'No audio was captured. Try again and share this tab’s audio.';
+        failed || 'No audio was captured. Try again.';
       this.phaseValue = 'error';
       this.emit();
     }

@@ -1,16 +1,9 @@
 // The duet engine — the heart of Solo.
 //
-// Spotify's playback stream cannot be DSP-processed (it runs inside the SDK's
-// cross-origin DRM iframe, and Spotify requires content "in its original
-// form"). So the duet is driven by the SDK's official volume control:
-//
-//   - while the mic hears you singing  ->  the artist ducks to a backing level
-//   - when you stop                    ->  the artist comes back and sings
-//
-// Manual mode lets you hold the Lead button (or the H key) to take the lead,
-// which is reliable even on speakers instead of headphones.
+// The duet engine is injected with SoloPlayer, so it works identically with the
+// Spotify SDK and the inline Audius/local player.
 
-import type { PlayerBridge } from './sdk';
+import type { SoloPlayer } from './playback';
 
 export type DuetMode = 'auto' | 'manual';
 export type Lead = 'artist' | 'you';
@@ -19,7 +12,7 @@ const TICK_MS = 80;
 const APPROACH = 0.28; // per-tick approach factor; ~250 ms to converge
 
 export class DuetEngine {
-  private player: PlayerBridge | null = null;
+  private player: SoloPlayer | null = null;
   private timer = 0;
   private current = 1;
   private lastSent = 1;
@@ -37,7 +30,7 @@ export class DuetEngine {
 
   onLead: ((lead: Lead) => void) | null = null;
 
-  start(player: PlayerBridge): void {
+  start(player: SoloPlayer): void {
     this.player = player;
     this.current = this.baseVolume;
     this.lastSent = -1;

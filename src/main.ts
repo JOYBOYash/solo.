@@ -2,11 +2,13 @@ import './style.css';
 import { getClientId, consumeClientIdParam } from './lib/config';
 import { handleCallbackIfPresent, isLoggedIn, logout } from './lib/auth';
 import { getMe } from './lib/api';
-import { renderConnectScreen, goLibrary } from './ui';
+import { renderConnectScreen, goLibrary, goHome } from './ui';
 import { store } from './store';
 import { toast } from './dom';
+import { initPwa } from './lib/pwa';
 
 async function boot(): Promise<void> {
+  initPwa();
   // Shared-Client-ID deployments can pass ?client_id=… once; it is stored and
   // stripped from the URL so the OAuth round-trip stays clean.
   consumeClientIdParam();
@@ -23,7 +25,7 @@ async function boot(): Promise<void> {
   }
 
   if (!isLoggedIn() || !getClientId()) {
-    renderConnectScreen();
+    goHome();
     return;
   }
 
@@ -31,7 +33,8 @@ async function boot(): Promise<void> {
     store.me = await getMe();
     void goLibrary();
   } catch (err) {
-    // A dead session (e.g. revoked access) drops back to the connect screen.
+    // A dead session (e.g. revoked access) drops back to the Spotify connect
+    // screen — with free Audius and local-file options always one tap away.
     logout();
     renderConnectScreen(err instanceof Error ? err.message : undefined);
     toast(err instanceof Error ? err.message : 'Could not reach Spotify.', 'error');

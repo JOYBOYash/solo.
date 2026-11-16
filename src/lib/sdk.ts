@@ -5,27 +5,12 @@
 // SDK's official volume/transport methods only.
 
 import { ensureToken } from './auth';
+import type { PlaybackState, PlaybackTrack, PlayerError, SoloPlayer } from './playback';
 
 const SDK_URL = 'https://sdk.scdn.co/spotify-player.js';
 
-export interface SdkTrack {
-  uri: string;
-  id: string | null;
-  name: string;
-  artists: { name: string; uri: string }[];
-  album?: { name: string; images: { url: string }[] };
-  duration_ms?: number;
-}
-
-export interface PlaybackState {
-  position: number;
-  duration: number;
-  paused: boolean;
-  /** performance.now() timestamp matching `position`. */
-  updatedAt: number;
-  track: SdkTrack;
-  nextTracks: SdkTrack[];
-}
+export type SdkTrack = PlaybackTrack;
+export type { PlaybackState };
 
 interface SpotifyPlayerLike {
   connect(): Promise<boolean>;
@@ -94,13 +79,15 @@ function loadSdk(): Promise<SpotifyNamespace> {
   return promise;
 }
 
-export class PlayerBridge {
+export class PlayerBridge implements SoloPlayer {
+  readonly inline = false;
+
   private player: SpotifyPlayerLike | null = null;
   private deviceId: string | null = null;
   private connecting: Promise<string> | null = null;
 
   onState: ((state: PlaybackState) => void) | null = null;
-  onError: ((error: SdkError) => void) | null = null;
+  onError: ((error: PlayerError) => void) | null = null;
   onDeviceReady: (() => void) | null = null;
   onDeviceLost: (() => void) | null = null;
 
