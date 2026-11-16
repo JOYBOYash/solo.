@@ -1,6 +1,6 @@
-// The room: a dark, focused performance view. It wires the Web Playback SDK,
-// the microphone monitor, the duet engine, synced lyrics and the Studio
-// recorder together.
+// The room: a dark, focused performance view. It wires the source player
+// (YouTube's IFrame player or Spotify's Web Playback SDK), the microphone
+// monitor, the duet engine, synced lyrics and the Studio recorder together.
 //
 // Three views share the same playback:
 //   • Lyrical — synced words with "You / Solo" attribution.
@@ -16,9 +16,9 @@ import {
   type RoomView,
   type TheatreStyle,
 } from './store';
-import { PlayerBridge, type PlaybackState } from './lib/sdk';
-import { InlinePlayer } from './lib/inline-player';
-import type { PlaybackTrack, PlayerError } from './lib/playback';
+import { PlayerBridge } from './lib/sdk';
+import { YouTubePlayer } from './lib/youtube-player';
+import type { PlaybackState, PlaybackTrack, PlayerError, SoloPlayer } from './lib/playback';
 import { MicMonitor, describePitch, noteName, midiFromHz } from './lib/mic';
 import { DuetEngine, type Lead } from './lib/duet';
 import { fetchLyrics, activeLineIndex, type Lyrics } from './lib/lrclib';
@@ -26,12 +26,7 @@ import { startPlaylist, startTracks, transferPlayback, ApiError } from './lib/ap
 import { icon, type IconName } from './icons';
 import { TheatreVisualizer } from './lib/visualizer';
 import { StudioVisualizer } from './lib/studio-visualizer';
-import {
-  StudioRecorder,
-  canRecordSource,
-  type RecorderOptions,
-  type RecorderStatus,
-} from './lib/recorder';
+import { StudioRecorder, canRecordSource, type RecorderStatus } from './lib/recorder';
 
 const VIEWS: RoomView[] = ['lyrical', 'theatre', 'studio'];
 
@@ -86,6 +81,7 @@ interface RoomRefs {
   helpModal: HTMLElement;
   helpClose: HTMLButtonElement;
   note: HTMLElement;
+  videoHost: HTMLElement;
 }
 
 let ctx: RoomContext | null = null;
@@ -174,8 +170,9 @@ export function closeRoom(): void {
   theatreVis = null;
   studioVis = null;
 
-  // Leaving the room should not keep music playing in the background.
-  if (store.player?.inline) {
+  // Leaving the room should not keep music playing in the background. The
+  // YouTube iframe is destroyed; Spotify stays connected so re-entry is fast.
+  if (store.player?.kind === 'youtube') {
     store.player.disconnect();
     store.player = null;
   } else {
@@ -442,15 +439,8 @@ function buildDom(context: RoomContext): RoomRefs {
   const studioHint = el(
     'div',
     { class: 'studio-hint' },
-    ...(context.source === 'spotify'
-      ? [
-          el('span', {}, icon('screen', 15), 'This tab'),
-          el('span', {}, icon('volume', 15), 'Share tab audio'),
-        ]
-      : [
-          el('span', {}, icon('music', 15), 'In-page audio'),
-          el('span', {}, icon('volume', 15), 'Recorded directly'),
-        ]),
+    el('span', {}, icon('screen', 15), 'This tab'),
+    el('span', {}, icon('volume', 15), 'Share tab audio'),
   );
   const studioStage = el(
     'div',
@@ -616,7 +606,7 @@ function buildDom(context: RoomContext): RoomRefs {
         store.prefs.backingFactor = v / 100;
         savePrefs(store.prefs);
       },
-      'The whole Spotify mix stays at this level under your voice.',
+      'The whole song stays at this level under your voice.',
     ),
     sliderGroup(
       'Mic sensitivity',
@@ -646,9 +636,19 @@ function buildDom(context: RoomContext): RoomRefs {
 
   const { modal: helpModal, closeBtn: helpClose } = buildHelpModal();
   const roomGlow = el('div', { class: 'room-glow' });
+  const videoHost = el('div', { class: 'video-frame' });
+  const videoDock = el(
+    'div',
+    {
+      class: 'video-dock',
+      hidden: context.source !== 'youtube',
+      'aria-label': 'YouTube player',
+    },
+    videoHost,
+  );
   const room = el(
     'main',
-    { class: 'room', 'data-view': currentView },
+    { class: 'room', 'data-view': currentView, 'data-source': context.source },
     roomGlow,
     el(
       'div',
@@ -656,6 +656,7 @@ function buildDom(context: RoomContext): RoomRefs {
       roomTop,
       viewBar,
       el('div', { class: 'room-stage' }, lyricsView, theatreView, studioView),
+      videoDock,
       meterRow,
       progressRow,
       roomControls,
@@ -696,20 +697,16 @@ function buildDom(context: RoomContext): RoomRefs {
   document.addEventListener('keyup', onKeyUp);
   window.addEventListener('blur', onBlur);
 
-  if (!canRecordSource(context.source)) {
-    studioStatus.textContent =
-      context.source === 'spotify' ? 'Desktop Chrome or Edge needed' : 'Recording unavailable';
-    recordBtn.title =
-      context.source === 'spotify'
-        ? 'Studio recording needs Chrome or Edge on desktop.'
-        : 'This browser cannot record audio with MediaRecorder.';
+  if (!canRecordSource()) {
+    studioStatus.textContent = 'Desktop Chrome or Edge needed';
+    recordBtn.title = 'Studio recording needs Chrome or Edge on desktop.';
     studioHint.hidden = true;
   }
 
   if (context.initialTrack) {
     renderTrackBasics(context.initialTrack);
-  } else if (context.freeTracks?.length) {
-    const track = context.freeTracks[context.freeIndex ?? 0];
+  } else if (context.youtubeTracks?.length) {
+    const track = context.youtubeTracks[context.youtubeIndex ?? 0];
     if (track) {
       renderTrackBasics({
         name: track.name,
@@ -727,8 +724,8 @@ function buildDom(context: RoomContext): RoomRefs {
         : 'Starting your queue…';
   }
 
-  // Theatre reads the live mic. For inline songs the music lane gets the real
-  // Web Audio signal; during a Spotify take it gets the captured tab audio.
+  // Theatre reads the live mic. The music lane uses the captured tab audio
+  // during a take and the playback volume otherwise.
   theatreVis = new TheatreVisualizer({
     canvas: theatreCanvas,
     mic: { copy: (out: Float32Array) => store.mic?.copyWaveform(out) ?? false },
@@ -805,6 +802,7 @@ function buildDom(context: RoomContext): RoomRefs {
     helpModal,
     helpClose,
     note,
+    videoHost,
   };
 }
 
@@ -948,20 +946,17 @@ async function init(r: RoomRefs): Promise<void> {
   if (!context) return;
 
   try {
-    const player =
-      context.source === 'spotify'
-        ? store.player instanceof PlayerBridge
-          ? store.player
-          : new PlayerBridge()
-        : new InlinePlayer();
+    let player: SoloPlayer;
+    if (context.source === 'spotify') {
+      player = store.player instanceof PlayerBridge ? store.player : new PlayerBridge();
+    } else {
+      player = new YouTubePlayer(r.videoHost);
+      player.loadQueue?.(context.youtubeTracks ?? [], context.youtubeIndex ?? 0);
+    }
     if (store.player && store.player !== player) store.player.disconnect();
     store.player = player;
     player.onState = (state) => handlePlayerState(state);
     player.onError = (error) => handlePlayerError(error);
-
-    if (player instanceof InlinePlayer) {
-      player.loadQueue(context.freeTracks ?? [], context.freeIndex ?? 0);
-    }
 
     const duet = store.duet ?? (store.duet = new DuetEngine());
     duet.setBaseVolume(store.prefs.baseVolume);
@@ -975,13 +970,13 @@ async function init(r: RoomRefs): Promise<void> {
     duet.start(player);
     updateLead();
 
-    // Inline audio can start immediately, while the click gesture is still
-    // fresh. Spotify playback waits for the SDK device below.
-    if (player.inline) {
+    // YouTube starts while the room-opening click is still fresh. Spotify waits
+    // for its device below, after the microphone is ready.
+    if (context.source === 'youtube') {
       setStatus('connecting', 'Starting song');
-      player.activate();
+      await player.connect();
+      if (!store.roomActive || refs !== r) return;
       raf = requestAnimationFrame(tick);
-      void player.resume();
     }
 
     // Microphone first for Spotify — it must be requested while the user's click
@@ -1018,7 +1013,7 @@ async function init(r: RoomRefs): Promise<void> {
     // Refresh the mode buttons now that we know whether the mic started.
     setMode(store.prefs.mode);
 
-    if (canRecordSource(context.source)) {
+    if (canRecordSource()) {
       recorder = new StudioRecorder();
       recorder.onStatus = (status) => {
         if (!store.roomActive || refs !== r) return;
@@ -1030,13 +1025,13 @@ async function init(r: RoomRefs): Promise<void> {
       } else if (context.initialTrack) {
         recorder.setLabel(context.initialTrack.name, context.initialTrack.artists.map((a) => a.name));
       } else {
-        const free = context.freeTracks?.[context.freeIndex ?? 0];
-        if (free) recorder.setLabel(free.name, [free.artist]);
+        const first = context.youtubeTracks?.[context.youtubeIndex ?? 0];
+        if (first) recorder.setLabel(first.name, [first.artist]);
       }
       applyRecorderStatus({ phase: 'idle', elapsedMs: 0, result: null });
     }
 
-    if (!player.inline) {
+    if (context.source === 'spotify') {
       setStatus('connecting', 'Connecting');
       const deviceId = (await player.connect()) as string;
       if (!store.roomActive || refs !== r) return;
@@ -1049,8 +1044,6 @@ async function init(r: RoomRefs): Promise<void> {
       // a newer room that has taken over the shared player).
       if (!store.roomActive) await player.pause();
     } else {
-      // The mic prompt can suspend a freshly created AudioContext; unlock it
-      // again now that the user is back in the room.
       player.activate();
     }
   } catch (err) {
@@ -1142,9 +1135,9 @@ function handlePlayerState(state: PlaybackState): void {
 function handlePlayerError(error: PlayerError): void {
   if (!store.roomActive) return;
   toast(error.message, 'error');
-  if (error.kind === 'account') {
+  if (error.kind === 'account' && ctx?.source === 'spotify') {
     setNote(
-      'Spotify Premium is required for in-browser playback. Close the room and connect with a Premium account — or switch to Audius or local files, which need no Spotify plan.',
+      'Spotify Premium is required for in-browser playback. Close the room and connect with a Premium account — or use YouTube mode, which needs no Spotify plan.',
     );
   }
 }
@@ -1331,18 +1324,15 @@ function updateStudioPitch(): void {
   const micHz = store.mic?.pitch ?? null;
   const songHz = songPitch();
   const recording = Boolean(recorder?.isRecording);
-  const inline = Boolean(store.player?.inline);
 
   refs.studioPitchNote.textContent = micHz ? noteName(micHz) : '—';
   refs.studioPitchTarget.textContent = songHz ? noteName(songHz) : '—';
   refs.studioPitchNote.title = micHz ? describePitch(micHz) : 'Waiting for your voice';
   refs.studioPitchTarget.title = songHz
     ? describePitch(songHz)
-    : inline
-      ? 'Listening to the live song'
-      : recording
-        ? 'Listening to the shared song audio'
-        : 'The song guide appears while a take is running';
+    : recording
+      ? 'Listening to the shared song audio'
+      : 'The song guide appears while a take is running';
 
   const tune = refs.studioPitchTune;
   tune.classList.remove('in-tune', 'sharp', 'flat', 'waiting');
@@ -1353,13 +1343,11 @@ function updateStudioPitch(): void {
     return;
   }
   if (!songHz) {
-    tune.textContent = inline ? 'Waiting for the song…' : recording ? 'Finding song note…' : 'Guide in takes';
+    tune.textContent = recording ? 'Finding song note…' : 'Guide in takes';
     tune.classList.add('waiting');
-    tune.title = inline
-      ? 'The guide appears when the song plays a clear note'
-      : recording
-        ? 'Waiting for a clear note from the shared tab audio'
-        : 'Record a take to compare your pitch with the song';
+    tune.title = recording
+      ? 'Waiting for a clear note from the shared tab audio'
+      : 'Record a take to compare your pitch with the song';
     return;
   }
 
@@ -1417,9 +1405,7 @@ function tick(): void {
       else if (!recordAudioWarned && now - recordAudioCheckAt > 6000) {
         recordAudioWarned = true;
         toast(
-          ctx?.source === 'spotify'
-            ? 'No song audio is reaching the take. Stop, retry, and enable “Share tab audio”.'
-            : 'No song audio is reaching the take. Make sure the song is playing, then try again.',
+          'No song audio is reaching the take. Stop, retry, and enable “Share tab audio”.',
           'error',
         );
       }
@@ -1617,21 +1603,20 @@ function setNote(message: string | null): void {
 }
 
 function songWaveform(out: Float32Array): boolean {
-  if (recorder?.copyMusicWaveform(out)) return true;
-  return store.player?.copyMusicWaveform?.(out) ?? false;
+  return recorder?.copyMusicWaveform(out) ?? false;
 }
 
 function songPitch(): number | null {
-  return recorder?.musicPitch() ?? store.player?.musicPitch?.() ?? null;
+  return recorder?.musicPitch() ?? null;
 }
 
 function songRms(): number {
-  return recorder?.musicRms() ?? store.player?.musicRms?.() ?? 0;
+  return recorder?.musicRms() ?? 0;
 }
 
 function musicVisualLevel(): number {
   if (!playback || playback.paused) return 0;
-  if (store.player?.inline || recorder?.isRecording) {
+  if (recorder?.isRecording) {
     return Math.min(1, songRms() * 4);
   }
   const relative = store.duet?.relativeVolume ?? 1;
@@ -1664,12 +1649,9 @@ async function calibrateMic(): Promise<void> {
 
 async function toggleRecording(): Promise<void> {
   if (!refs) return;
-  const source = ctx?.source ?? 'spotify';
-  if (!canRecordSource(source)) {
+  if (!canRecordSource()) {
     toast(
-      source === 'spotify'
-        ? 'Spotify Studio recording needs Chrome or Edge on desktop with tab audio. Audius and local files record in more browsers.'
-        : 'This browser cannot record audio. Try Chrome, Edge, Firefox or Safari with MediaRecorder support.',
+      'Studio takes need Chrome or Edge on desktop with tab-audio capture.',
       'error',
     );
     return;
@@ -1709,26 +1691,13 @@ async function toggleRecording(): Promise<void> {
   recordAudioCheckAt = 0;
 
   const track = playback?.track;
-  const player = store.player;
-  let options: RecorderOptions | undefined;
-  if (source !== 'spotify' && player?.inline) {
-    const musicStream = player.getMusicStream?.() ?? null;
-    if (!musicStream) {
-      toast('Song audio is not ready yet. Press Play, then start the take again.', 'error');
-      return;
-    }
-    options = {
-      musicStream,
-      musicAnalyser: player.getMusicAnalyser?.() ?? null,
-    };
-  }
 
   try {
     recorder.setLabel(
       track?.name ?? 'Solo take',
       track?.artists.map((a) => a.name) ?? [],
     );
-    await recorder.start(mic.mediaStream, options);
+    await recorder.start(mic.mediaStream);
   } catch (err) {
     if (store.roomActive) {
       toast(err instanceof Error ? err.message : 'Recording could not start.', 'error');
@@ -1763,7 +1732,7 @@ function applyRecorderStatus(status: RecorderStatus): void {
 
   const statusLabels: Record<RecorderStatus['phase'], string> = {
     idle: 'Ready',
-    requesting: ctx?.source === 'spotify' ? 'Choose This tab' : 'Starting…',
+    requesting: 'Choose This tab',
     recording: 'Recording',
     finalizing: 'Saving take',
     saved: 'Saved',

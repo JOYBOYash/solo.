@@ -37,7 +37,12 @@ export type IconName =
   | 'folder'
   | 'upload'
   | 'arrowRight'
-  | 'externalLink';
+  | 'externalLink'
+  | 'youtube'
+  | 'spotify'
+  | 'book'
+  | 'key'
+  | 'headphones';
 
 const PATHS: Record<IconName, string> = {
   play: '<path d="M8 5.14v13.72a1 1 0 0 0 1.52.85l11-6.86a1 1 0 0 0 0-1.7l-11-6.86A1 1 0 0 0 8 5.14Z" fill="currentColor" stroke="none"/>',
@@ -99,6 +104,16 @@ const PATHS: Record<IconName, string> = {
   arrowRight: '<path d="M5 12h14"/><path d="m12 5 7 7-7 7"/>',
   externalLink:
     '<path d="M15 3h6v6"/><path d="M10 14 21 3"/><path d="M18 13v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h6"/>',
+  youtube:
+    '<rect width="20" height="14" x="2" y="5" rx="4"/><path d="m10 9 5 3-5 3V9Z" fill="currentColor" stroke="none"/>',
+  spotify:
+    '<circle cx="12" cy="12" r="10"/><path d="M7.5 9.3c3.2-.9 6.7-.5 9 1.1"/><path d="M8.2 12.5c2.6-.7 5.5-.4 7.4.9"/><path d="M8.9 15.5c2-.5 4.1-.2 5.7.7"/>',
+  book:
+    '<path d="M4 19.5A2.5 2.5 0 0 1 6.5 17H20"/><path d="M6.5 2H20v20H6.5A2.5 2.5 0 0 1 4 19.5v-15A2.5 2.5 0 0 1 6.5 2Z"/>',
+  key:
+    '<circle cx="7.5" cy="15.5" r="4.5"/><path d="m10.7 12.3 8.8-8.8"/><path d="m16 7 2 2"/><path d="m18.5 4.5 2 2"/>',
+  headphones:
+    '<path d="M3 14h3a2 2 0 0 1 2 2v3a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-5a9 9 0 0 1 18 0v5a2 2 0 0 1-2 2h-1a2 2 0 0 1-2-2v-3a2 2 0 0 1 2-2h3"/>',
 };
 
 export function icon(name: IconName, size = 20, className = ''): SVGSVGElement {

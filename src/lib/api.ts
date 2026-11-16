@@ -61,7 +61,7 @@ async function request<T>(path: string, init?: RequestInit, retry = true): Promi
     }
     if (res.status === 403) {
       message =
-        'Spotify refused access (403). A Development-Mode Spotify app only allows accounts added under “User Management” in the dashboard, and in-browser playback still needs Premium. You can sing with Audius or local files — no Spotify account required.';
+        'Spotify refused access (403). A Development-Mode Spotify app only allows accounts added under “User Management” in the dashboard, and in-browser playback still needs Premium. YouTube mode is free and needs no Spotify account.';
     }
     throw new ApiError(message, res.status);
   }

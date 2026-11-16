@@ -80,7 +80,7 @@ function loadSdk(): Promise<SpotifyNamespace> {
 }
 
 export class PlayerBridge implements SoloPlayer {
-  readonly inline = false;
+  readonly kind = 'spotify';
 
   private player: SpotifyPlayerLike | null = null;
   private deviceId: string | null = null;

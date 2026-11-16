@@ -1,8 +1,8 @@
 /* Solo service worker — an offline app shell, no third-party caching.
    Navigation is network-first so a new deployment appears immediately; hashed
-   Vite assets are cached after their first fetch. Spotify, Audius and lyrics
+   Vite assets are cached after their first fetch. YouTube, Spotify and lyrics
    requests are never intercepted. */
-const VERSION = 'solo-shell-v2';
+const VERSION = 'solo-shell-v3';
 const CORE = [
   '/',
   '/index.html',

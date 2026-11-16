@@ -1,7 +1,7 @@
 // The duet engine — the heart of Solo.
 //
 // The duet engine is injected with SoloPlayer, so it works identically with the
-// Spotify SDK and the inline Audius/local player.
+// Spotify SDK and the YouTube IFrame player.
 
 import type { SoloPlayer } from './playback';
 

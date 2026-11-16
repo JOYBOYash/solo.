@@ -1,7 +1,7 @@
 // Shared session state across screens.
 
 import type { Me, Playlist, PlaylistDetail, Track } from './lib/api';
-import type { FreeTrack, MusicSource, SoloPlayer } from './lib/playback';
+import type { MusicSource, SoloPlayer, YouTubeTrack } from './lib/playback';
 import type { MicMonitor } from './lib/mic';
 import type { DuetEngine } from './lib/duet';
 
@@ -14,9 +14,9 @@ export interface RoomContext {
   looseUris?: string[];
   /** Absent when a followed playlist is played from the top (Spotify hides its items). */
   initialTrack?: Track;
-  /** Audius local queue for free rooms. */
-  freeTracks?: FreeTrack[];
-  freeIndex?: number;
+  /** YouTube queue for free rooms. */
+  youtubeTracks?: YouTubeTrack[];
+  youtubeIndex?: number;
 }
 
 export type RoomView = 'lyrical' | 'theatre' | 'studio';

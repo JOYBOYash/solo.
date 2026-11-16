@@ -3,7 +3,7 @@
   "private": true,
   "version": "1.0.0",
   "type": "module",
-  "description": "A solo duet player. Solo plays your Spotify playlist, listens while you sing, and carries the vocals you leave behind.",
+  "description": "A solo duet player. Solo plays YouTube or your Spotify playlists, listens while you sing, and carries the vocals you leave behind.",
   "scripts": {
     "dev": "vite",
     "build": "tsc && vite build",

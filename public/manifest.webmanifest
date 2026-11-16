@@ -2,7 +2,7 @@
   "id": "/",
   "name": "Solo — sing with any song",
   "short_name": "Solo",
-  "description": "A personal duet player. Sing with Audius, your own audio files, or a Spotify playlist — Solo hears your voice and carries the other half.",
+  "description": "A personal duet player. Sing with YouTube or your Spotify playlists — Solo hears your voice and carries the other half.",
   "start_url": "/",
   "scope": "/",
   "display": "standalone",

@@ -1,26 +1,22 @@
-// Shared playback types. Solo can drive two very different engines:
+// Shared playback types. Solo has two sources, both played by their official
+// web players:
 //
-//   • PlayerBridge — the Spotify Web Playback SDK (tab capture only).
-//   • InlinePlayer — Audius streams and local files through an <audio> element
-//     wired into the Web Audio API, so pitch, visuals and recordings work
-//     directly from the page.
+//   • YouTube — the IFrame Player API, searched with a personal Data API key.
+//   • Spotify — the Web Playback SDK, connected with a personal Client ID.
 //
-// The room and the duet engine talk to both through SoloPlayer.
+// Neither iframe exposes its audio to the Web Audio API, so the room controls
+// volume through the player's official methods and records takes with tab
+// audio capture.
 
-export type MusicSource = 'spotify' | 'audius' | 'local';
-export type FreeSource = Exclude<MusicSource, 'spotify'>;
+export type MusicSource = 'youtube' | 'spotify';
 
-/** A song that Solo can stream itself, without a Spotify account. */
-export interface FreeTrack {
+/** A YouTube search/trending result, ready for the room queue. */
+export interface YouTubeTrack {
   id: string;
-  source: FreeSource;
   name: string;
   artist: string;
-  artworkUrl?: string;
+  artworkUrl: string;
   durationMs: number;
-  /** Audius stream URL. Local files use `file` instead. */
-  streamUrl?: string;
-  file?: File;
 }
 
 export interface PlaybackTrack {
@@ -47,12 +43,9 @@ export interface PlayerError {
   message: string;
 }
 
-/**
- * The surface the room, duet engine and store rely on. Inline-only methods are
- * optional so PlayerBridge stays a plain Spotify transport.
- */
+/** The transport surface shared by the room and the duet engine. */
 export interface SoloPlayer {
-  readonly inline: boolean;
+  readonly kind: MusicSource;
 
   onState: ((state: PlaybackState) => void) | null;
   onError: ((error: PlayerError) => void) | null;
@@ -70,13 +63,6 @@ export interface SoloPlayer {
   setVolume(v: number): Promise<void>;
   disconnect(): void;
 
-  /** Load a queue of Audius/local tracks. Room calls this before playing. */
-  loadQueue?(tracks: FreeTrack[], startIndex: number): void;
-
-  /** Live Web Audio tap for Studio recording and pitch. */
-  getMusicStream?(): MediaStream | null;
-  getMusicAnalyser?(): AnalyserNode | null;
-  copyMusicWaveform?(out: Float32Array): boolean;
-  musicRms?(): number;
-  musicPitch?(): number | null;
+  /** Replace the YouTube queue. Spotify keeps its queue in the Spotify app. */
+  loadQueue?(tracks: YouTubeTrack[], startIndex: number): void;
 }

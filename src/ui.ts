@@ -1,5 +1,6 @@
-// Shell, home/source chooser, Spotify connect screen, Spotify library, free
-// Audius and local-file libraries, and the shared track lists.
+// Shell, home, YouTube search, Spotify setup/library, and the setup guides.
+// The app is deliberately spare: two visual source cards on the home screen,
+// short labels everywhere, and the long instructions live in the guides.
 
 import {
   getClientId,
@@ -27,19 +28,33 @@ import { el, artwork, avatar, toast, dominantTint } from './dom';
 import { store, type RoomContext } from './store';
 import { renderRoom, closeRoom } from './room';
 import { PlayerBridge } from './lib/sdk';
-import { searchAudius, trendingAudius } from './lib/audius';
-import { localTracksFromFiles } from './lib/local';
-import type { FreeSource, FreeTrack } from './lib/playback';
+import {
+  clearYouTubeKey,
+  getYouTubeKey,
+  hasYouTubeKey,
+  looksLikeYouTubeKey,
+  searchYouTube,
+  setYouTubeKey,
+  trendingYouTube,
+} from './lib/youtube';
+import type { YouTubeTrack } from './lib/playback';
 import { installApp, isStandalone } from './lib/pwa';
 import { icon, type IconName } from './icons';
 
 const app = document.getElementById('app') as HTMLElement;
 
-type NavSection = 'home' | 'spotify' | 'audius' | 'local';
+type NavSection = 'home' | 'youtube' | 'spotify' | 'guides';
+type GuideSlug = 'youtube' | 'spotify' | 'recording';
 
 /* ------------------------------------------------------------
    Shell
    ------------------------------------------------------------ */
+
+function clearHash(): void {
+  if (location.hash) {
+    history.replaceState(null, '', location.pathname + location.search);
+  }
+}
 
 function brandLink(): HTMLElement {
   return el(
@@ -91,7 +106,7 @@ function shell(content: HTMLElement, opts?: { active?: NavSection }): void {
 
   const installBtn = isStandalone()
     ? null
-    : navLink('Install app', 'download', false, () => void installApp());
+    : navLink('Install', 'download', false, () => void installApp());
 
   app.replaceChildren(
     el(
@@ -104,14 +119,14 @@ function shell(content: HTMLElement, opts?: { active?: NavSection }): void {
         el(
           'nav',
           { class: 'nav-links', 'aria-label': 'Music sources' },
-          navLink('Free music', 'globe', active === 'audius', () => goAudius()),
-          navLink('Local files', 'folder', active === 'local', () => goLocal()),
+          navLink('YouTube', 'youtube', active === 'youtube', () => goYouTube()),
           navLink(
-            loggedIn ? 'My playlists' : 'Spotify',
-            'music',
+            loggedIn ? 'Playlists' : 'Spotify',
+            'spotify',
             active === 'spotify',
             () => (loggedIn ? void goLibrary() : renderConnectScreen()),
           ),
+          navLink('Guides', 'book', active === 'guides', () => goGuides()),
         ),
         el(
           'div',
@@ -120,22 +135,9 @@ function shell(content: HTMLElement, opts?: { active?: NavSection }): void {
           me
             ? el(
                 'div',
-                { class: 'user-chip' },
+                { class: 'user-chip', title: me.display_name ?? me.id },
                 avatar(me.images, me.display_name ?? me.id),
                 el('span', { class: 'user-name' }, me.display_name ?? me.id),
-                // product was removed from /me in February 2026; hide the badge
-                // when Spotify doesn't return a plan.
-                me.product
-                  ? el(
-                      'span',
-                      { class: 'plan-badge' },
-                      me.product === 'premium'
-                        ? 'Premium'
-                        : me.product === 'free' || me.product === 'open'
-                          ? 'Free plan'
-                          : me.product,
-                    )
-                  : null,
               )
             : null,
           loggedIn
@@ -143,15 +145,16 @@ function shell(content: HTMLElement, opts?: { active?: NavSection }): void {
                 'button',
                 {
                   class: 'btn btn-small btn-ghost',
+                  title: 'Log out of Spotify',
                   onclick: () => {
-                    // Release the Spotify Connect device before dropping the token.
                     store.player?.disconnect();
                     store.player = null;
                     logout();
                     location.reload();
                   },
                 },
-                'Log out',
+                icon('close', 15),
+                el('span', { class: 'logout-label' }, 'Log out'),
               )
             : null,
         ),
@@ -160,24 +163,28 @@ function shell(content: HTMLElement, opts?: { active?: NavSection }): void {
     content,
     el(
       'footer',
-      { class: 'footer' },
+      { class: 'footer m-footer' },
       el(
         'div',
         { class: 'footer-inner' },
         el(
           'span',
           {},
-          'Solo — a personal duet player. Free music from Audius, your own audio files, and optional Spotify playlists. Lyrics from LRCLIB. Nothing you sing is uploaded.',
+          'Solo · YouTube + Spotify · Lyrics by LRCLIB · Nothing you sing is uploaded.',
         ),
         el(
           'span',
           { class: 'footer-links' },
-          el('a', { href: 'https://audius.co', target: '_blank', rel: 'noopener' }, 'Audius'),
-          el('a', { href: 'https://lrclib.net', target: '_blank', rel: 'noopener' }, 'LRCLIB'),
+          el('a', { href: '#/guides', onclick: (e) => { e.preventDefault(); goGuides(); } }, 'Setup guides'),
+          el(
+            'a',
+            { href: 'https://lrclib.net', target: '_blank', rel: 'noopener' },
+            'LRCLIB',
+          ),
           el(
             'a',
             { href: 'https://developer.spotify.com/dashboard', target: '_blank', rel: 'noopener' },
-            'Spotify for Developers',
+            'Spotify Developers',
           ),
         ),
       ),
@@ -186,276 +193,637 @@ function shell(content: HTMLElement, opts?: { active?: NavSection }): void {
 }
 
 /* ------------------------------------------------------------
-   Home — pick a music source
+   Home
    ------------------------------------------------------------ */
 
 export function goHome(): void {
   leaveRoomIfActive();
+  clearHash();
   renderHome();
 }
 
 export function renderHome(): void {
-  const loggedIn = isLoggedIn();
+  document.title = 'Solo — sing with any song';
+  const ytReady = hasYouTubeKey();
+  const spotifyReady = Boolean(getClientId() ?? (hasDeploymentClientId() ? 'deployment' : ''));
+  const spotifyConnected = isLoggedIn();
+
   const content = el(
     'main',
-    { class: 'page home' },
+    { class: 'page m-home' },
     el(
       'section',
-      { class: 'home-hero' },
+      { class: 'm-hero' },
       el(
         'div',
-        { class: 'container narrow' },
+        { class: 'container m-hero-inner' },
         el('img', {
-          class: 'home-mark',
+          class: 'm-hero-mark',
           src: '/Solo_white.svg',
           alt: '',
-          width: 72,
-          height: 72,
+          width: 64,
+          height: 64,
         }),
-        el('span', { class: 'eyebrow' }, icon('mic', 14), 'A duet with yourself'),
-        el('h1', {}, 'You bring the voice. Solo brings the other half.'),
-        el(
-          'p',
-          { class: 'lede' },
-          'Play a song, start singing, and Solo ducks the artist so you take the lead. Stop, and the record sings straight back. Start with free music — no account, no subscription.',
-        ),
+        el('h1', {}, 'Sing. ', el('span', {}, 'Solo answers.')),
+        el('p', { class: 'm-hero-sub' }, 'Pick a source. Take the lead.'),
         el(
           'div',
-          { class: 'cta-row' },
-          el(
-            'button',
-            { class: 'btn btn-primary', onclick: () => goAudius() },
-            icon('globe', 17),
-            el('span', {}, 'Browse free music'),
-          ),
-          el(
-            'button',
-            { class: 'btn', onclick: () => goLocal() },
-            icon('folder', 17),
-            el('span', {}, 'Open local files'),
-          ),
-          el(
-            'button',
-            {
-              class: 'btn btn-ghost',
-              onclick: () => (loggedIn ? void goLibrary() : renderConnectScreen()),
-            },
-            'Spotify playlists',
-          ),
-        ),
-        el(
-          'p',
-          { class: 'home-note' },
-          'Audius and local files need no Spotify account. Spotify is optional and requires Premium for in-browser playback.',
+          { class: 'm-source-grid' },
+          homeSourceCard({
+            source: 'youtube',
+            tag: ytReady ? 'Key saved' : 'Free · your key',
+            title: 'YouTube',
+            meta: ytReady ? 'Trending & search' : '2-minute setup',
+            iconName: 'youtube',
+            onClick: () => goYouTube(),
+          }),
+          homeSourceCard({
+            source: 'spotify',
+            tag: spotifyConnected ? 'Connected' : spotifyReady ? 'Premium · ready' : 'Premium · your app',
+            title: 'Spotify',
+            meta: spotifyConnected ? 'Your playlists' : 'Connect your app',
+            iconName: 'spotify',
+            onClick: () => (spotifyConnected ? void goLibrary() : renderConnectScreen()),
+          }),
         ),
       ),
     ),
     el(
       'section',
-      { class: 'container' },
-      el('div', { class: 'source-grid' }, sourceCard({
-        source: 'audius',
-        iconName: 'globe',
-        tag: 'Free · no account',
-        title: 'Audius',
-        body: 'Stream independent music from Audius, search millions of tracks, and sing along with a live pitch guide.',
-        onClick: () => goAudius(),
-      }), sourceCard({
-        source: 'local',
-        iconName: 'folder',
-        tag: 'Private · on-device',
-        title: 'Your music',
-        body: 'Choose MP3s, WAVs or any audio files from this device. Nothing is uploaded, and takes save straight back to your downloads.',
-        onClick: () => goLocal(),
-      }), sourceCard({
-        source: 'spotify',
-        iconName: 'music',
-        tag: loggedIn ? 'Connected · Premium' : 'Optional · Premium',
-        title: loggedIn ? 'Your playlists' : 'Spotify playlists',
-        body: loggedIn
-          ? 'Open your Spotify library, or search every track Spotify exposes to your app.'
-          : 'Connect your own Spotify app for playlists and Spotify-wide search. Development Mode also needs your account on the app allowlist.',
-        onClick: () => (loggedIn ? void goLibrary() : renderConnectScreen()),
-      })),
-    ),
-    el(
-      'section',
-      { class: 'container home-section' },
+      { class: 'container m-home-lower' },
       el(
         'div',
-        { class: 'section-head' },
-        el('h2', {}, 'How a duet works'),
-        el('p', { class: 'muted' }, 'Headphones recommended. Manual mode works on speakers.'),
+        { class: 'm-steps', 'aria-label': 'How Solo works' },
+        el(
+          'div',
+          { class: 'm-step' },
+          el('span', { class: 'm-step-icon' }, icon('search', 18)),
+          el('span', {}, 'Pick'),
+        ),
+        el('span', { class: 'm-step-line', 'aria-hidden': 'true' }),
+        el(
+          'div',
+          { class: 'm-step' },
+          el('span', { class: 'm-step-icon' }, icon('mic', 18)),
+          el('span', {}, 'Sing'),
+        ),
+        el('span', { class: 'm-step-line', 'aria-hidden': 'true' }),
+        el(
+          'div',
+          { class: 'm-step' },
+          el('span', { class: 'm-step-icon' }, icon('waves', 18)),
+          el('span', {}, 'Solo answers'),
+        ),
       ),
       el(
-        'ul',
-        { class: 'steps home-steps' },
+        'div',
+        { class: 'm-home-links' },
         el(
-          'li',
-          {},
-          el('span', { class: 'step-k' }, '01'),
-          el('p', {}, 'Pick any song from Audius, your files, or Spotify. The music starts inside Solo.'),
+          'button',
+          { class: 'm-text-link', onclick: () => goGuides() },
+          icon('book', 15),
+          el('span', {}, 'Setup guides'),
         ),
-        el(
-          'li',
-          {},
-          el('span', { class: 'step-k' }, '02'),
-          el('p', {}, 'Sing. Solo hears your voice and ducks the artist to a comfortable backing level.'),
-        ),
-        el(
-          'li',
-          {},
-          el('span', { class: 'step-k' }, '03'),
-          el('p', {}, 'Stop and the vocals come straight back. Save a Studio take if you want to keep it.'),
-        ),
-      ),
-    ),
-    isStandalone()
-      ? null
-      : el(
-          'section',
-          { class: 'container home-section' },
-          el(
-            'div',
-            { class: 'install-card' },
-            el('span', { class: 'install-icon' }, icon('download', 22)),
-            el(
-              'div',
-              { class: 'install-copy' },
-              el('h3', {}, 'Take Solo with you'),
-              el(
-                'p',
-                {},
-                'Install Solo as an app for a full-screen room, home-screen icon and an offline shell. Local files keep working offline.',
-              ),
-            ),
-            el(
+        isStandalone()
+          ? null
+          : el(
               'button',
-              { class: 'btn btn-primary', onclick: () => void installApp() },
-              'Install app',
+              { class: 'm-text-link', onclick: () => void installApp() },
+              icon('download', 15),
+              el('span', {}, 'Install app'),
             ),
-          ),
-        ),
-    el(
-      'section',
-      { class: 'container home-section' },
-      el(
-        'div',
-        { class: 'note-card' },
-        el(
-          'p',
-          {},
-          'Solo never uploads your voice. Free-source recordings mix the song and mic directly in your browser; Spotify recordings capture this tab’s audio. Both save to your device.',
-        ),
-        el(
-          'p',
-          {},
-          'Spotify playback is only available in Chrome or Edge on desktop with a Premium account. Audius and local files work in more browsers and record without a tab picker.',
-        ),
       ),
     ),
   );
   shell(content, { active: 'home' });
 }
 
-function sourceCard(opts: {
-  source: NavSection;
-  iconName: IconName;
+function homeSourceCard(opts: {
+  source: 'youtube' | 'spotify';
   tag: string;
   title: string;
-  body: string;
+  meta: string;
+  iconName: IconName;
   onClick: () => void;
 }): HTMLButtonElement {
   return el(
     'button',
     {
-      class: 'source-card',
+      class: 'm-source-card',
       'data-source': opts.source,
       onclick: opts.onClick,
     },
-    el('span', { class: 'source-arrow' }, icon('arrowRight', 18)),
-    el('span', { class: 'source-icon' }, icon(opts.iconName, 24)),
-    el('span', { class: 'source-tag' }, opts.tag),
-    el('h3', {}, opts.title),
-    el('p', {}, opts.body),
+    el('span', { class: 'm-source-glow', 'aria-hidden': 'true' }),
+    el('span', { class: 'm-source-top' }, el('span', { class: 'm-source-tag' }, opts.tag)),
+    el('span', { class: 'm-source-icon' }, icon(opts.iconName, 36)),
+    el('span', { class: 'm-source-title' }, opts.title),
+    el('span', { class: 'm-source-meta' }, opts.meta),
+    el('span', { class: 'm-source-arrow' }, icon('arrowRight', 18)),
   ) as HTMLButtonElement;
 }
 
 /* ------------------------------------------------------------
-   Spotify connect screen
+   YouTube — free mode with a personal Data API key
+   ------------------------------------------------------------ */
+
+let ytTrending: YouTubeTrack[] = [];
+let ytTracks: YouTubeTrack[] = [];
+let ytMode: 'trending' | 'search' = 'trending';
+let ytQuery = '';
+let ytLoading = false;
+let ytError = '';
+let ytSeq = 0;
+let ytEditingKey = false;
+
+export function goYouTube(): void {
+  leaveRoomIfActive();
+  clearHash();
+  ytSeq++;
+  ytTracks = [];
+  ytLoading = false;
+  ytError = '';
+  ytMode = 'trending';
+  ytQuery = '';
+  ytEditingKey = !hasYouTubeKey();
+  renderYouTubeScreen();
+  if (!ytEditingKey) {
+    if (ytTrending.length) {
+      ytTracks = ytTrending;
+      refreshYouTubeResults();
+    } else {
+      void loadYouTubeTrending();
+    }
+  }
+}
+
+function renderYouTubeScreen(): void {
+  document.title = 'YouTube — Solo';
+  const hasKey = hasYouTubeKey();
+  const content = el(
+    'main',
+    { class: 'page m-page' },
+    el(
+      'section',
+      { class: 'container m-page-head' },
+      el(
+        'a',
+        { class: 'm-back', href: '#', onclick: (e) => { e.preventDefault(); goHome(); } },
+        icon('arrowLeft', 16),
+        el('span', {}, 'Home'),
+      ),
+      el(
+        'div',
+        { class: 'm-title-row' },
+        el('span', { class: 'm-title-icon', 'data-source': 'youtube' }, icon('youtube', 30)),
+        el(
+          'div',
+          { class: 'm-title-text' },
+          el('span', { class: 'm-kicker' }, 'Free mode'),
+          el('h2', {}, 'YouTube'),
+        ),
+        hasKey && !ytEditingKey
+          ? el(
+              'button',
+              {
+                class: 'm-icon-link',
+                title: 'Change the YouTube API key',
+                'aria-label': 'Change the YouTube API key',
+                onclick: () => {
+                  ytEditingKey = true;
+                  renderYouTubeScreen();
+                },
+              },
+              icon('key', 16),
+              el('span', {}, 'Key'),
+            )
+          : null,
+      ),
+      hasKey && !ytEditingKey
+        ? el(
+            'div',
+            { class: 'm-searchbar' },
+            el('span', { class: 'm-search-icon' }, icon('search', 18)),
+            el('input', {
+              class: 'm-search-input',
+              id: 'yt-search',
+              type: 'search',
+              placeholder: 'Search songs, artists or videos',
+              autocomplete: 'off',
+              spellcheck: 'false',
+            }),
+            el(
+              'button',
+              {
+                class: 'm-search-trending',
+                id: 'yt-trending',
+                title: 'Load trending music',
+                'aria-label': 'Load trending music',
+                onclick: () => void loadYouTubeTrending(),
+              },
+              icon('refresh', 17),
+              el('span', {}, 'Trending'),
+            ),
+          )
+        : null,
+    ),
+    el(
+      'section',
+      { class: 'container m-body' },
+      hasKey && !ytEditingKey
+        ? el(
+            'div',
+            { class: 'm-toolbar' },
+            el('span', { class: 'm-count', id: 'yt-count' }),
+            el(
+              'a',
+              { class: 'm-toolbar-link', href: '#/guides/youtube' },
+              icon('book', 14),
+              el('span', {}, 'Guide'),
+            ),
+          )
+        : null,
+      ytEditingKey || !hasKey
+        ? youtubeSetupCard()
+        : el(
+            'div',
+            { id: 'yt-results' },
+            el('div', { class: 'm-state' }, el('span', { class: 'm-spinner' })),
+          ),
+      hasKey && !ytEditingKey
+        ? el(
+            'p',
+            { class: 'm-attrib' },
+            'Music and thumbnails from YouTube. Searches use your Google quota.',
+          )
+        : null,
+    ),
+  );
+  shell(content, { active: 'youtube' });
+
+  if (!hasKey || ytEditingKey) return;
+
+  const search = document.getElementById('yt-search') as HTMLInputElement | null;
+  if (!search) return;
+
+  let debounce = 0;
+  search.addEventListener('input', () => {
+    window.clearTimeout(debounce);
+    const query = search.value.trim();
+    if (!query) {
+      debounce = window.setTimeout(() => void loadYouTubeTrending(), 120);
+      return;
+    }
+    if (query.length < 2) return;
+    debounce = window.setTimeout(() => void runYouTubeSearch(query), 500);
+  });
+  search.addEventListener('keydown', (e) => {
+    if (e.key !== 'Enter') return;
+    window.clearTimeout(debounce);
+    void runYouTubeSearch(search.value.trim());
+  });
+
+  refreshYouTubeResults();
+}
+
+function youtubeSetupCard(): HTMLElement {
+  const current = getYouTubeKey() ?? '';
+  const input = el('input', {
+    class: 'm-key-input',
+    id: 'yt-key',
+    type: 'text',
+    placeholder: 'AIza…',
+    autocomplete: 'off',
+    spellcheck: 'false',
+    value: current,
+  }) as HTMLInputElement;
+  const error = el('p', { class: 'form-error', hidden: 'true' });
+
+  return el(
+    'div',
+    { class: 'm-setup' },
+    el(
+      'div',
+      { class: 'm-setup-head' },
+      el('span', { class: 'm-setup-icon' }, icon('key', 24)),
+      el(
+        'div',
+        {},
+        el('h3', {}, 'Add your YouTube key'),
+        el('p', {}, 'Saved in this browser. Sent only to Google.'),
+      ),
+    ),
+    el(
+      'form',
+      {
+        class: 'm-key-form',
+        onsubmit: (e) => {
+          e.preventDefault();
+          const value = input.value.trim();
+          if (!looksLikeYouTubeKey(value)) {
+            error.hidden = false;
+            error.textContent = 'That does not look like a Google API key. It normally starts with AIza.';
+            return;
+          }
+          error.hidden = true;
+          setYouTubeKey(value);
+          ytEditingKey = false;
+          toast('YouTube key saved.');
+          goYouTube();
+        },
+      },
+      input,
+      el('button', { class: 'btn btn-primary', type: 'submit' }, 'Save key'),
+    ),
+    error,
+    el(
+      'div',
+      { class: 'm-setup-actions' },
+      el(
+        'button',
+        {
+          class: 'btn btn-small',
+          onclick: () => openGuideModal('youtube'),
+        },
+        icon('book', 15),
+        el('span', {}, 'How to get a key'),
+      ),
+      el('a', { class: 'm-toolbar-link', href: '#/guides/youtube' }, 'Full guide'),
+      current
+        ? el(
+            'button',
+            {
+              class: 'm-toolbar-link danger',
+              onclick: () => {
+                clearYouTubeKey();
+                ytEditingKey = false;
+                ytTrending = [];
+                toast('YouTube key removed.');
+                goYouTube();
+              },
+            },
+            'Remove',
+          )
+        : null,
+    ),
+  );
+}
+
+async function loadYouTubeTrending(): Promise<void> {
+  const seq = ++ytSeq;
+  ytMode = 'trending';
+  ytQuery = '';
+  ytLoading = true;
+  ytError = '';
+  refreshYouTubeResults();
+  const input = document.getElementById('yt-search') as HTMLInputElement | null;
+  if (input) input.value = '';
+  try {
+    const tracks = await trendingYouTube(24);
+    if (seq !== ytSeq) return;
+    ytTrending = tracks;
+    ytTracks = tracks;
+  } catch (err) {
+    if (seq !== ytSeq) return;
+    ytError = err instanceof Error ? err.message : 'YouTube could not be reached.';
+  } finally {
+    if (seq === ytSeq) {
+      ytLoading = false;
+      refreshYouTubeResults();
+    }
+  }
+}
+
+async function runYouTubeSearch(query: string): Promise<void> {
+  if (!query) {
+    await loadYouTubeTrending();
+    return;
+  }
+  if (query === ytQuery && ytMode === 'search' && (ytTracks.length || ytLoading)) return;
+
+  const seq = ++ytSeq;
+  ytMode = 'search';
+  ytQuery = query;
+  ytLoading = true;
+  ytError = '';
+  ytTracks = [];
+  refreshYouTubeResults();
+  try {
+    const tracks = await searchYouTube(query, 24);
+    if (seq !== ytSeq) return;
+    const current = (document.getElementById('yt-search') as HTMLInputElement | null)?.value.trim() ?? '';
+    if (current !== query) return;
+    ytTracks = tracks;
+  } catch (err) {
+    if (seq !== ytSeq) return;
+    ytError = err instanceof Error ? err.message : 'YouTube search failed.';
+  } finally {
+    if (seq === ytSeq) {
+      ytLoading = false;
+      refreshYouTubeResults();
+    }
+  }
+}
+
+function refreshYouTubeResults(): void {
+  const results = document.getElementById('yt-results');
+  const count = document.getElementById('yt-count');
+  const trendingBtn = document.getElementById('yt-trending') as HTMLButtonElement | null;
+  if (!results) return;
+  if (trendingBtn) trendingBtn.disabled = ytLoading;
+
+  if (count) {
+    count.textContent = ytLoading
+      ? ytMode === 'search'
+        ? 'Searching…'
+        : 'Loading…'
+      : ytMode === 'search'
+        ? ytTracks.length
+          ? `${ytTracks.length} results`
+          : ''
+        : ytTracks.length
+          ? 'Trending now'
+          : '';
+  }
+
+  if (ytLoading && !ytTracks.length) {
+    results.replaceChildren(
+      el(
+        'div',
+        { class: 'm-video-grid' },
+        ...Array.from({ length: 8 }, () =>
+          el(
+            'div',
+            { class: 'm-video-card skeleton' },
+            el('span', { class: 'm-video-thumb' }),
+            el(
+              'span',
+              { class: 'm-video-info' },
+              el('span', { class: 'm-skeleton-line' }),
+              el('span', { class: 'm-skeleton-line short' }),
+            ),
+          ),
+        ),
+      ),
+    );
+    return;
+  }
+
+  if (ytError) {
+    results.replaceChildren(
+      el(
+        'div',
+        { class: 'm-state' },
+        el('span', { class: 'm-state-icon' }, icon('alert', 28)),
+        el('h3', {}, 'YouTube needs a hand'),
+        el('p', {}, ytError),
+        el(
+          'div',
+          { class: 'm-state-actions' },
+          el(
+            'button',
+            {
+              class: 'btn btn-primary',
+              onclick: () => void (ytMode === 'search' ? runYouTubeSearch(ytQuery) : loadYouTubeTrending()),
+            },
+            icon('refresh', 16),
+            el('span', {}, 'Try again'),
+          ),
+          el(
+            'button',
+            {
+              class: 'btn',
+              onclick: () => {
+                ytEditingKey = true;
+                renderYouTubeScreen();
+              },
+            },
+            icon('key', 16),
+            el('span', {}, 'Change key'),
+          ),
+        ),
+      ),
+    );
+    return;
+  }
+
+  if (!ytTracks.length) {
+    results.replaceChildren(
+      el(
+        'div',
+        { class: 'm-state' },
+        el('span', { class: 'm-state-icon' }, icon('search', 28)),
+        el('h3', {}, ytMode === 'search' ? `Nothing for “${ytQuery}”` : 'No trending music'),
+        el('p', {}, ytMode === 'search' ? 'Try a different title or artist.' : 'Try again in a moment.'),
+      ),
+    );
+    return;
+  }
+
+  results.replaceChildren(
+    el(
+      'div',
+      { class: 'm-video-grid' },
+      ...ytTracks.map((track, index) => youtubeCard(track, index)),
+    ),
+  );
+}
+
+function youtubeCard(track: YouTubeTrack, index: number): HTMLButtonElement {
+  return el(
+    'button',
+    {
+      class: 'm-video-card',
+      title: `Sing ${track.name}`,
+      onclick: () => startYouTubeRoom(index),
+    },
+    el(
+      'span',
+      { class: 'm-video-thumb' },
+      artwork(
+        track.artworkUrl ? [{ url: track.artworkUrl }] : undefined,
+        'm-video-img',
+        '',
+        '▶',
+      ),
+      el('span', { class: 'm-video-play' }, icon('play', 20)),
+      track.durationMs
+        ? el('span', { class: 'm-video-time' }, formatMs(track.durationMs))
+        : null,
+    ),
+    el(
+      'span',
+      { class: 'm-video-info' },
+      el('span', { class: 'm-video-title' }, track.name),
+      el('span', { class: 'm-video-artist' }, track.artist),
+    ),
+  ) as HTMLButtonElement;
+}
+
+function startYouTubeRoom(index: number): void {
+  if (!ytTracks.length) return;
+  renderRoom(
+    {
+      source: 'youtube',
+      kind: 'loose',
+      playlistName: ytMode === 'search' ? `YouTube · ${ytQuery}` : 'YouTube · trending',
+      youtubeTracks: ytTracks,
+      youtubeIndex: index,
+    },
+    () => goYouTube(),
+  );
+}
+
+/* ------------------------------------------------------------
+   Spotify — connect with a personal app Client ID
    ------------------------------------------------------------ */
 
 export function renderConnectScreen(error?: string, forceSetup = false): void {
+  document.title = 'Spotify — Solo';
   leaveRoomIfActive();
+  clearHash();
   const clientId = forceSetup ? null : getClientId();
   const deploymentId = hasDeploymentClientId();
 
   const content = el(
     'main',
-    { class: 'hero spotify-hero' },
+    { class: 'page m-page' },
     el(
-      'div',
-      { class: 'container narrow' },
+      'section',
+      { class: 'container m-page-head' },
       el(
         'a',
-        { class: 'back-link', href: '#', onclick: (e) => { e.preventDefault(); goHome(); } },
+        { class: 'm-back', href: '#', onclick: (e) => { e.preventDefault(); goHome(); } },
         icon('arrowLeft', 16),
-        el('span', {}, 'All music sources'),
+        el('span', {}, 'Home'),
       ),
-      el('span', { class: 'eyebrow' }, icon('music', 14), 'Spotify · optional'),
-      el('h1', {}, 'Connect Spotify for playlists and search.'),
-      el(
-        'p',
-        { class: 'lede' },
-        'Solo can play your Spotify playlists through the Web Playback SDK. Spotify is entirely optional — Audius and local files need no account and no Premium plan.',
-      ),
-      error ? el('p', { class: 'form-error connect-error' }, error) : null,
       el(
         'div',
-        { class: 'free-escape' },
+        { class: 'm-title-row' },
+        el('span', { class: 'm-title-icon', 'data-source': 'spotify' }, icon('spotify', 30)),
         el(
           'div',
-          {},
-          el('strong', {}, 'Spotify blocking you?'),
-          el(
-            'p',
-            {},
-            'Development-Mode apps only allow accounts added to their User Management list, and in-browser playback needs Premium. Keep singing with a free source instead.',
-          ),
-        ),
-        el(
-          'div',
-          { class: 'cta-row' },
-          el(
-            'button',
-            { class: 'btn btn-primary', onclick: () => goAudius() },
-            icon('globe', 16),
-            el('span', {}, 'Free music'),
-          ),
-          el(
-            'button',
-            { class: 'btn', onclick: () => goLocal() },
-            icon('folder', 16),
-            el('span', {}, 'Local files'),
-          ),
+          { class: 'm-title-text' },
+          el('span', { class: 'm-kicker' }, 'Premium mode'),
+          el('h2', {}, 'Spotify'),
         ),
       ),
-      el('div', { class: 'cta-row', id: 'cta' }, clientId ? null : setupCard()),
-      forceSetup && deploymentId
-        ? el(
-            'div',
-            { class: 'cta-row' },
-            el(
-              'button',
-              { class: 'btn', onclick: () => renderConnectScreen() },
-              'Use the deployment’s Spotify app',
-            ),
-          )
-        : null,
+      el('p', { class: 'm-page-sub' }, 'Your playlists, in the room.'),
+    ),
+    el(
+      'section',
+      { class: 'container m-body' },
+      error ? el('p', { class: 'form-error m-connect-error' }, error) : null,
       clientId
         ? el(
             'div',
-            { class: 'cta-row' },
+            { class: 'm-connect-card' },
+            el('span', { class: 'm-connect-icon' }, icon('check', 24)),
+            el(
+              'div',
+              { class: 'm-connect-copy' },
+              el('h3', {}, 'App key saved'),
+              el('p', {}, 'Connect a Premium account to start playback.'),
+            ),
             el(
               'button',
               {
@@ -473,60 +841,66 @@ export function renderConnectScreen(error?: string, forceSetup = false): void {
                   }
                 },
               },
-              'Connect Spotify',
+              icon('spotify', 17),
+              el('span', {}, 'Connect Spotify'),
             ),
             el(
-              'button',
-              {
-                class: 'btn',
-                onclick: () => {
-                  clearClientId();
-                  // When the deployment has its own app, offer the override form
-                  // explicitly; otherwise clearing the local ID already shows it.
-                  renderConnectScreen(undefined, deploymentId);
+              'div',
+              { class: 'm-inline-actions' },
+              el(
+                'button',
+                {
+                  class: 'm-toolbar-link',
+                  onclick: () => {
+                    clearClientId();
+                    renderConnectScreen(undefined, deploymentId);
+                  },
                 },
-              },
-              'Change Client ID',
+                'Change key',
+              ),
+              el(
+                'button',
+                {
+                  class: 'm-toolbar-link',
+                  onclick: () => openGuideModal('spotify'),
+                },
+                'Setup guide',
+              ),
+              el('a', { class: 'm-toolbar-link', href: '#/guides/spotify' }, 'Full article'),
+            ),
+          )
+        : spotifySetupCard(deploymentId),
+      forceSetup && deploymentId
+        ? el(
+            'div',
+            { class: 'm-inline-actions' },
+            el(
+              'button',
+              { class: 'm-toolbar-link', onclick: () => renderConnectScreen() },
+              'Use the deployment’s app',
             ),
           )
         : null,
       clientId && deploymentId && !hasLocalClientIdOverride()
-        ? el('p', { class: 'muted', style: 'margin-top:12px' }, 'This deployment is preconfigured with its own Spotify app.')
+        ? el('p', { class: 'm-attrib' }, 'This deployment uses its own Spotify app.')
         : null,
       el(
-        'ul',
-        { class: 'steps' },
-        el(
-          'li',
-          {},
-          el('span', { class: 'step-k' }, '01'),
-          el('p', {}, 'Create a Spotify app, then add this exact redirect URI: ', el('code', {}, redirectUri())),
-        ),
-        el(
-          'li',
-          {},
-          el('span', { class: 'step-k' }, '02'),
-          el('p', {}, 'In the app’s User Management, add the email of every Spotify account that will sing. Development Mode blocks everyone else.'),
-        ),
-        el(
-          'li',
-          {},
-          el('span', { class: 'step-k' }, '03'),
-          el('p', {}, 'Connect a Premium account for in-browser playback. Browsing playlists works without Premium.'),
-        ),
-      ),
-      el(
         'div',
-        { class: 'note-card' },
+        { class: 'm-escape' },
         el(
-          'p',
-          {},
-          'A 403 from Spotify almost always means the connected account is not on the app’s allowlist, or that playback needs Premium. The app owner can fix the allowlist in the Spotify dashboard; nobody can bypass it from the browser.',
+          'div',
+          { class: 'm-escape-copy' },
+          el('span', { class: 'm-escape-icon' }, icon('youtube', 20)),
+          el('p', {}, 'No Spotify Premium? YouTube mode is free.'),
         ),
         el(
-          'p',
-          {},
-          'Prefer not to set up Spotify? Audius and local files work right now. Wear headphones for the most reliable Auto duet.',
+          'button',
+          {
+            class: 'btn btn-small',
+            onclick: () => goYouTube(),
+          },
+          icon('youtube', 15),
+          el('span', {}, 'Use YouTube'),
         ),
       ),
     ),
@@ -534,12 +908,12 @@ export function renderConnectScreen(error?: string, forceSetup = false): void {
   shell(content, { active: 'spotify' });
 }
 
-function setupCard(): HTMLElement {
+function spotifySetupCard(deploymentId: boolean): HTMLElement {
   const input = el('input', {
-    class: 'input',
+    class: 'm-key-input',
     type: 'text',
     id: 'client-id',
-    placeholder: 'e.g. 4c1f2a9b8d7e4f3a9b8c7d6e5f4a3b2c',
+    placeholder: '32-character Client ID',
     autocomplete: 'off',
     spellcheck: 'false',
   }) as HTMLInputElement;
@@ -547,34 +921,28 @@ function setupCard(): HTMLElement {
 
   return el(
     'div',
-    { class: 'setup-card' },
-    el('h2', {}, 'Use your own Spotify app'),
+    { class: 'm-setup' },
     el(
-      'p',
-      {},
-      'Solo uses the public PKCE flow, so each singer can bring their own Client ID — no approval queue and no secret. Setup takes about two minutes.',
-    ),
-    hasDeploymentClientId()
-      ? el('p', { class: 'muted' }, 'This deployment already has a default Client ID. Saving one here overrides it in this browser only.')
-      : null,
-    el(
-      'ol',
-      { class: 'setup-ol' },
-      el('li', {}, 'Open the ', el('a', { href: 'https://developer.spotify.com/dashboard', target: '_blank', rel: 'noopener' }, 'Spotify developer dashboard'), ' and create an app (any name — “Solo” works).'),
-      el('li', {}, 'In the app settings, add this exact redirect URI: ', el('code', {}, redirectUri())),
-      el('li', {}, 'Under “User Management”, add the email address of the Spotify account you will sing with — development apps can only be used by added users.'),
-      el('li', {}, 'Copy the app’s Client ID (a 32-character hex string) into the field below and connect. It is stored only in this browser.'),
+      'div',
+      { class: 'm-setup-head' },
+      el('span', { class: 'm-setup-icon spotify' }, icon('key', 24)),
+      el(
+        'div',
+        {},
+        el('h3', {}, 'Add your app key'),
+        el('p', {}, 'Spotify calls it a Client ID. It is public, not a secret.'),
+      ),
     ),
     el(
       'form',
       {
-        class: 'setup-form',
+        class: 'm-key-form',
         onsubmit: (e) => {
           e.preventDefault();
           const value = input.value.trim();
           if (!/^[0-9a-f]{32}$/i.test(value)) {
             error.hidden = false;
-            error.textContent = 'That does not look like a Spotify Client ID — it is a 32-character hexadecimal string from your dashboard app settings.';
+            error.textContent = 'A Client ID is 32 hexadecimal characters from your Spotify app settings.';
             return;
           }
           error.hidden = true;
@@ -582,9 +950,33 @@ function setupCard(): HTMLElement {
           renderConnectScreen();
         },
       },
-      el('div', { class: 'field' }, el('label', { for: 'client-id' }, 'Spotify Client ID'), input, error),
-      el('button', { class: 'btn btn-primary', type: 'submit' }, 'Save and continue'),
+      input,
+      el('button', { class: 'btn btn-primary', type: 'submit' }, 'Save key'),
     ),
+    error,
+    el(
+      'div',
+      { class: 'm-setup-actions' },
+      el(
+        'button',
+        {
+          class: 'btn btn-small',
+          onclick: () => openGuideModal('spotify'),
+        },
+        icon('book', 15),
+        el('span', {}, 'How to get your key'),
+      ),
+      el('a', { class: 'm-toolbar-link', href: '#/guides/spotify' }, 'Full article'),
+      el(
+        'span',
+        { class: 'm-premium-chip' },
+        icon('spotify', 13),
+        el('span', {}, 'Premium required'),
+      ),
+    ),
+    deploymentId
+      ? el('p', { class: 'm-attrib' }, 'This deployment has a default key. Yours overrides it in this browser.')
+      : null,
   );
 }
 
@@ -594,6 +986,7 @@ function setupCard(): HTMLElement {
 
 export async function goLibrary(): Promise<void> {
   leaveRoomIfActive();
+  clearHash();
   if (!isLoggedIn()) {
     renderConnectScreen();
     return;
@@ -644,67 +1037,102 @@ async function fetchPlaylists(): Promise<void> {
   }
 }
 
-export function renderLibraryScreen(): void {
+function renderLibraryScreen(): void {
+  document.title = 'Playlists — Solo';
   const content = el(
     'main',
-    { class: 'page' },
+    { class: 'page m-page' },
     el(
-      'div',
-      { class: 'page-hero' },
+      'section',
+      { class: 'container m-page-head' },
+      el(
+        'a',
+        { class: 'm-back', href: '#', onclick: (e) => { e.preventDefault(); goHome(); } },
+        icon('arrowLeft', 16),
+        el('span', {}, 'Home'),
+      ),
       el(
         'div',
-        { class: 'container' },
+        { class: 'm-title-row' },
+        el('span', { class: 'm-title-icon', 'data-source': 'spotify' }, icon('spotify', 30)),
         el(
-          'a',
-          { class: 'back-link', href: '#', onclick: (e) => { e.preventDefault(); goHome(); } },
-          icon('arrowLeft', 16),
-          el('span', {}, 'All music sources'),
+          'div',
+          { class: 'm-title-text' },
+          el('span', { class: 'm-kicker' }, 'Your library'),
+          el('h2', {}, 'Playlists'),
         ),
         el(
           'div',
-          { class: 'page-head' },
-          el('h2', {}, 'Your Spotify playlists'),
+          { class: 'm-title-actions' },
           el(
-            'div',
-            { class: 'page-head-actions' },
-            el('span', { class: 'muted', id: 'library-count' }, 'Loading playlists…'),
-            el(
-              'button',
-              {
-                class: 'btn btn-small btn-ghost',
-                onclick: () => goAudius(),
-                title: 'Sing with free music instead',
-              },
-              icon('globe', 16),
-              el('span', {}, 'Free music'),
-            ),
-            el('button', {
-              class: 'btn btn-small',
+            'button',
+            {
+              class: 'm-icon-link',
+              title: 'Refresh playlists',
+              'aria-label': 'Refresh playlists',
               id: 'library-refresh',
-              disabled: playlistsLoading,
               onclick: () => void fetchPlaylists(),
-            }, icon('refresh', 16), el('span', {}, 'Refresh')),
+            },
+            icon('refresh', 16),
+            el('span', {}, 'Refresh'),
+          ),
+          el(
+            'button',
+            {
+              class: 'm-icon-link',
+              title: 'Use YouTube instead',
+              'aria-label': 'Use YouTube instead',
+              onclick: () => goYouTube(),
+            },
+            icon('youtube', 16),
+            el('span', {}, 'YouTube'),
           ),
         ),
+      ),
+      el(
+        'div',
+        { class: 'm-searchbar' },
+        el('span', { class: 'm-search-icon' }, icon('search', 18)),
+        el('input', {
+          class: 'm-search-input',
+          id: 'library-search',
+          type: 'search',
+          placeholder: 'Filter playlists or search songs',
+          autocomplete: 'off',
+        }),
         el(
           'div',
-          { class: 'search-row' },
-          el('input', {
-            class: 'input',
-            id: 'library-search',
-            type: 'search',
-            placeholder: 'Filter playlists, or search songs to sing',
-          }),
+          { class: 'm-scope', role: 'tablist' },
           el(
-            'div',
-            { class: 'segmented', role: 'tablist' },
-            el('button', { class: 'seg-btn active', 'data-scope': 'playlists', onclick: () => setScope('playlists') }, icon('music', 16), el('span', {}, 'Playlists')),
-            el('button', { class: 'seg-btn', 'data-scope': 'songs', onclick: () => setScope('songs') }, icon('search', 16), el('span', {}, 'Songs')),
+            'button',
+            { class: 'm-scope-btn active', 'data-scope': 'playlists', onclick: () => setScope('playlists') },
+            icon('music', 15),
+            el('span', {}, 'Playlists'),
+          ),
+          el(
+            'button',
+            { class: 'm-scope-btn', 'data-scope': 'songs', onclick: () => setScope('songs') },
+            icon('search', 15),
+            el('span', {}, 'Songs'),
           ),
         ),
       ),
     ),
-    el('div', { class: 'container' }, el('div', { id: 'library-results' }, el('div', { class: 'empty-state' }, el('h3', {}, 'Loading your playlists…')))),
+    el(
+      'section',
+      { class: 'container m-body' },
+      el(
+        'div',
+        { class: 'm-toolbar' },
+        el('span', { class: 'm-count', id: 'library-count' }, 'Loading…'),
+        premiumBanner(),
+      ),
+      el(
+        'div',
+        { id: 'library-results' },
+        el('div', { class: 'm-state' }, el('span', { class: 'm-spinner' })),
+      ),
+    ),
   );
   shell(content, { active: 'spotify' });
 
@@ -713,7 +1141,6 @@ export function renderLibraryScreen(): void {
   search.addEventListener('input', () => {
     window.clearTimeout(debounce);
     refreshLibraryLists();
-    // Songs stream in as you type; playlists filter instantly.
     if (scope === 'songs') {
       if (!search.value.trim()) {
         void maybeSearchSongs();
@@ -768,7 +1195,7 @@ function setScope(next: 'playlists' | 'songs'): void {
     searchSeq++;
     searching = false;
   }
-  for (const btn of document.querySelectorAll('.seg-btn')) {
+  for (const btn of document.querySelectorAll('.m-scope-btn')) {
     btn.classList.toggle('active', (btn as HTMLElement).dataset.scope === scope);
   }
   refreshLibraryLists();
@@ -788,23 +1215,34 @@ function refreshLibraryLists(): void {
   if (scope === 'playlists') {
     const list = store.playlists;
     if (!list.length) {
-      if (count) count.textContent = playlistsLoading ? 'Loading playlists…' : '';
+      if (count) count.textContent = playlistsLoading ? 'Loading…' : '';
       if (playlistsLoading) {
         results.replaceChildren(
-          el('div', { class: 'empty-state' }, el('h3', {}, 'Loading your playlists…'), el('p', {}, 'Fetching real playlists from Spotify.')),
+          el('div', { class: 'm-video-grid' },
+            ...Array.from({ length: 6 }, () =>
+              el('div', { class: 'm-playlist-card skeleton' },
+                el('span', { class: 'm-playlist-art skeleton-block' }),
+                el('span', { class: 'm-skeleton-line' }),
+                el('span', { class: 'm-skeleton-line short' }),
+              ),
+            ),
+          ),
         );
       } else if (playlistsError) {
         results.replaceChildren(
           el(
             'div',
-            { class: 'empty-state' },
-            el('h3', {}, 'Could not load your playlists'),
+            { class: 'm-state' },
+            el('span', { class: 'm-state-icon' }, icon('alert', 28)),
+            el('h3', {}, 'Could not load playlists'),
             el('p', {}, playlistsError),
             el(
               'div',
-              { class: 'cta-row' },
-              el('button', { class: 'btn btn-primary', onclick: () => void fetchPlaylists() }, icon('refresh', 16), el('span', {}, 'Try again')),
-              el('button', { class: 'btn', onclick: () => goAudius() }, icon('globe', 16), el('span', {}, 'Use free music')),
+              { class: 'm-state-actions' },
+              el('button', { class: 'btn btn-primary', onclick: () => void fetchPlaylists() },
+                icon('refresh', 16), el('span', {}, 'Try again')),
+              el('button', { class: 'btn', onclick: () => goYouTube() },
+                icon('youtube', 16), el('span', {}, 'Use YouTube')),
             ),
           ),
         );
@@ -812,10 +1250,16 @@ function refreshLibraryLists(): void {
         results.replaceChildren(
           el(
             'div',
-            { class: 'empty-state' },
-            el('h3', {}, 'No playlists to sing with yet'),
-            el('p', {}, 'Create a playlist in Spotify (or follow one), then press Refresh — it will appear here.'),
-            el('button', { class: 'btn btn-primary', onclick: () => goAudius() }, icon('globe', 16), el('span', {}, 'Browse free music instead')),
+            { class: 'm-state' },
+            el('span', { class: 'm-state-icon' }, icon('music', 28)),
+            el('h3', {}, 'No playlists yet'),
+            el('p', {}, 'Create or follow a playlist in Spotify, then refresh.'),
+            el(
+              'button',
+              { class: 'btn btn-primary', onclick: () => goYouTube() },
+              icon('youtube', 16),
+              el('span', {}, 'Browse YouTube'),
+            ),
           ),
         );
       }
@@ -824,20 +1268,21 @@ function refreshLibraryLists(): void {
     const filtered = query ? list.filter((p) => (p.name ?? '').toLowerCase().includes(query)) : list;
     if (count) {
       count.textContent = playlistsLoading
-        ? 'Refreshing playlists…'
+        ? 'Refreshing…'
         : query
-          ? `${filtered.length} of ${list.length} playlists`
+          ? `${filtered.length} of ${list.length}`
           : `${list.length} playlists`;
     }
     if (filtered.length) {
-      results.replaceChildren(el('div', { class: 'playlist-grid' }, ...filtered.map((p) => playlistCard(p))));
+      results.replaceChildren(el('div', { class: 'm-playlist-grid' }, ...filtered.map((p) => playlistCard(p))));
       return;
     }
     results.replaceChildren(
       el(
         'div',
-        { class: 'empty-state' },
-        el('h3', {}, 'No playlist matches that filter'),
+        { class: 'm-state' },
+        el('span', { class: 'm-state-icon' }, icon('search', 28)),
+        el('h3', {}, 'No playlist matches'),
         el('button', {
           class: 'btn btn-primary',
           onclick: () => { setScope('songs'); void maybeSearchSongs({ fresh: true }); },
@@ -849,15 +1294,15 @@ function refreshLibraryLists(): void {
 
   if (count) {
     count.textContent = searching
-      ? 'Searching Spotify…'
+      ? 'Searching…'
       : songResults.length
         ? `${songResults.length} of ${songTotal} songs`
-        : 'Search songs across all of Spotify';
+        : '';
   }
 
   if (searching && !songResults.length) {
     results.replaceChildren(
-      el('div', { class: 'empty-state' }, el('h3', {}, 'Searching…'), el('p', {}, 'Spotify is matching your search.')),
+      el('div', { class: 'm-state' }, el('span', { class: 'm-spinner' }), el('p', {}, 'Searching Spotify…')),
     );
     return;
   }
@@ -867,12 +1312,10 @@ function refreshLibraryLists(): void {
     results.replaceChildren(
       el(
         'div',
-        { class: 'empty-state' },
-        el('h3', {}, typed ? `No songs found for “${typed}”` : 'Search for a song to sing'),
-        el('p', {}, typed
-          ? 'Try a different spelling, another song title, or the artist’s name.'
-          : 'Results appear as you type — no need to press Enter.'),
-        el('button', { class: 'btn', onclick: () => goAudius() }, icon('globe', 16), el('span', {}, 'Search Audius instead')),
+        { class: 'm-state' },
+        el('span', { class: 'm-state-icon' }, icon('search', 28)),
+        el('h3', {}, typed ? `Nothing for “${typed}”` : 'Search Spotify'),
+        el('p', {}, typed ? 'Try another title or artist.' : 'Results appear as you type.'),
       ),
     );
     return;
@@ -883,7 +1326,7 @@ function refreshLibraryLists(): void {
     children.push(
       el(
         'div',
-        { class: 'cta-row' },
+        { class: 'm-inline-actions' },
         el('button', {
           class: 'btn',
           disabled: searching,
@@ -891,7 +1334,7 @@ function refreshLibraryLists(): void {
             (e.currentTarget as HTMLButtonElement).disabled = true;
             void maybeSearchSongs({ append: true });
           },
-        }, searching ? 'Loading more…' : 'Load more results'),
+        }, searching ? 'Loading…' : 'Load more'),
       ),
     );
   }
@@ -900,24 +1343,23 @@ function refreshLibraryLists(): void {
 
 function playlistCard(playlist: Playlist): HTMLElement {
   const count = playlistSongCount(playlist);
-  // Spotify hides items for followed playlists, so fall back to the owner.
   const meta = count != null
     ? `${count} songs`
     : playlist.owner?.display_name
-      ? `Playlist by ${playlist.owner.display_name}`
+      ? `By ${playlist.owner.display_name}`
       : 'Playlist';
   return el(
     'button',
     {
-      class: 'playlist-card',
+      class: 'm-playlist-card',
       onclick: () => void goTracks(playlist.id),
     },
-    artwork(playlist.images, 'playlist-art', `Artwork for ${playlist.name}`),
+    artwork(playlist.images, 'm-playlist-art', `Artwork for ${playlist.name}`),
     el(
-      'div',
-      { class: 'playlist-card-body' },
-      el('h3', { title: playlist.name }, playlist.name),
-      el('div', { class: 'meta' }, meta),
+      'span',
+      { class: 'm-playlist-body' },
+      el('strong', { title: playlist.name }, playlist.name),
+      el('span', { class: 'm-playlist-meta' }, meta),
     ),
   );
 }
@@ -947,7 +1389,7 @@ async function maybeSearchSongs(opts?: { fresh?: boolean; append?: boolean }): P
   refreshLibraryLists();
   try {
     const result = await searchTracks(query, append ? songResults.length : 0);
-    if (seq !== searchSeq) return; // a newer keystroke superseded this search
+    if (seq !== searchSeq) return;
     const current = (document.getElementById('library-search') as HTMLInputElement | null)?.value.trim() ?? '';
     if (scope !== 'songs' || current !== query) {
       searching = false;
@@ -971,13 +1413,11 @@ async function maybeSearchSongs(opts?: { fresh?: boolean; append?: boolean }): P
    Spotify playlist tracks
    ------------------------------------------------------------ */
 
-export async function goTracks(playlistId: string): Promise<void> {
+async function goTracks(playlistId: string): Promise<void> {
   leaveRoomIfActive();
   const seq = ++tracksSeq;
   renderTracksScreen(null, []);
   try {
-    // Fetch sequentially: the detail request always succeeds, while the items
-    // request is refused for playlists the user only follows.
     const detail = await getPlaylistDetail(playlistId);
     if (seq !== tracksSeq) return;
     store.playlist = detail;
@@ -985,9 +1425,6 @@ export async function goTracks(playlistId: string): Promise<void> {
       const tracks = await getPlaylistTracks(playlistId);
       if (seq !== tracksSeq) return;
       store.playlistTracks = tracks;
-      // A followed playlist may answer with an empty page instead of a 403.
-      // An owned empty playlist reports total 0, so only treat a non-zero or
-      // missing count as "Spotify hid the songs".
       const count = playlistSongCount(detail);
       renderTracksScreen(detail, tracks, { locked: tracks.length === 0 && count !== 0 });
     } catch (err) {
@@ -1015,80 +1452,83 @@ function renderTracksScreen(
     ? count != null
       ? `${count} songs`
       : detail.owner?.display_name
-        ? `Playlist by ${detail.owner.display_name}`
+        ? `By ${detail.owner.display_name}`
         : 'Playlist'
     : '';
-  const hero = el(
+  document.title = detail ? `${detail.name} — Solo` : 'Playlist — Solo';
+  const heroInner = el(
     'div',
-    { class: 'page-hero' },
+    { class: 'container m-page-head m-track-head' },
     el(
-      'div',
-      { class: 'container' },
-      el('a', { class: 'back-link', href: '#', onclick: (e) => { e.preventDefault(); void goLibrary(); } }, icon('arrowLeft', 16), el('span', {}, 'All playlists')),
-      detail
-        ? el(
-            'div',
-            { class: 'playlist-head' },
-            artwork(detail.images, '', `Artwork for ${detail.name}`),
-            el(
-              'div',
-              {},
-              el('h2', {}, detail.name),
-              el('p', { class: 'muted' }, meta),
-              locked
-                ? null
-                : el(
-                    'div',
-                    { class: 'cta-row start-row' },
-                    el('button', {
-                      class: 'btn btn-primary',
-                      onclick: () => startPlaylistRoom(detail),
-                    }, icon('play', 16), el('span', {}, 'Play from the start')),
-                    el('button', {
-                      class: 'btn btn-ghost',
-                      onclick: () => goAudius(),
-                    }, icon('globe', 16), el('span', {}, 'Free music')),
-                  ),
-            ),
-          )
-        : el('div', { class: 'empty-state' }, el('h3', {}, 'Loading playlist…')),
+      'a',
+      { class: 'm-back', href: '#', onclick: (e) => { e.preventDefault(); void goLibrary(); } },
+      icon('arrowLeft', 16),
+      el('span', {}, 'Playlists'),
     ),
+    detail
+      ? el(
+          'div',
+          { class: 'm-playlist-hero' },
+          artwork(detail.images, 'm-playlist-big', `Artwork for ${detail.name}`),
+          el(
+            'div',
+            { class: 'm-playlist-hero-text' },
+            el('span', { class: 'm-kicker' }, meta),
+            el('h2', {}, detail.name),
+            locked
+              ? null
+              : el(
+                  'button',
+                  {
+                    class: 'btn btn-primary',
+                    onclick: () => startPlaylistRoom(detail),
+                  },
+                  icon('play', 16),
+                  el('span', {}, 'Sing from the start'),
+                ),
+          ),
+        )
+      : el('div', { class: 'm-state' }, el('span', { class: 'm-spinner' })),
   );
+  const hero = el('section', { class: 'm-track-hero' }, heroInner);
 
   let body: HTMLElement | null = null;
   if (detail) {
     if (locked) {
       body = el(
         'div',
-        { class: 'empty-state' },
-        el('h3', {}, 'Spotify keeps this playlist’s songs private'),
+        { class: 'm-state' },
+        el('span', { class: 'm-state-icon' }, icon('music', 28)),
+        el('h3', {}, 'Spotify hides these songs'),
+        el('p', {}, 'Followed playlists can still be played from the start — Solo picks up each song as it plays.'),
         el(
-          'p',
-          {},
-          'Since February 2026, Spotify only lists the songs of playlists you own or collaborate on. Followed playlists can still be played from the start — Solo picks up each song as Spotify plays it.',
+          'button',
+          {
+            class: 'btn btn-primary',
+            onclick: () => startPlaylistRoom(detail),
+          },
+          icon('play', 16),
+          el('span', {}, 'Sing from the start'),
         ),
-        el('button', {
-          class: 'btn btn-primary',
-          onclick: () => startPlaylistRoom(detail),
-        }, icon('play', 16), el('span', {}, 'Play from the start')),
       );
     } else if (tracks.length) {
       body = trackList(tracks, 'playlist');
     } else {
       body = el(
         'div',
-        { class: 'empty-state' },
-        el('h3', {}, 'This playlist has no playable songs'),
-        el('p', {}, 'Local files and podcast episodes cannot be played through the web player.'),
+        { class: 'm-state' },
+        el('span', { class: 'm-state-icon' }, icon('music', 28)),
+        el('h3', {}, 'No playable songs'),
+        el('p', {}, 'Podcast episodes and local files cannot play through the web player.'),
       );
     }
   }
 
   const content = el(
     'main',
-    { class: 'page' },
+    { class: 'page m-page' },
     hero,
-    el('div', { class: 'container' }, detail ? premiumBanner() : null, body),
+    el('section', { class: 'container m-body' }, premiumBanner(), body),
   );
   shell(content, { active: 'spotify' });
 
@@ -1097,9 +1537,8 @@ function renderTracksScreen(
 
 /** Start a playlist at its first song without knowing its track list up front. */
 function startPlaylistRoom(detail: PlaylistDetail): void {
-  // `product` is no longer returned by GET /me, so only block on a known free plan.
   if (store.me?.product && store.me.product !== 'premium') {
-    toast('Spotify Premium is required for in-browser playback. Connect a Premium account — or sing with Audius or local files.', 'error');
+    toast('Spotify Premium is required for in-browser playback. YouTube mode is free.', 'error');
     return;
   }
   prewarmPlayer();
@@ -1115,7 +1554,7 @@ function startPlaylistRoom(detail: PlaylistDetail): void {
   );
 }
 
-/** Spotify-style gradient header tinted with the playlist artwork. */
+/** Soft gradient header tinted with the playlist artwork. */
 async function applyHeaderTint(hero: HTMLElement, images: { url: string }[] | undefined): Promise<void> {
   const tint = await dominantTint(images?.[0]?.url);
   if (!tint || !hero.isConnected) return;
@@ -1124,13 +1563,11 @@ async function applyHeaderTint(hero: HTMLElement, images: { url: string }[] | un
 
 function premiumBanner(): HTMLElement | null {
   const product = store.me?.product;
-  // `product` was removed from GET /me in February 2026 — unknown means we
-  // can't tell, so don't nag; playback will report any account limitation.
   if (!product || product === 'premium') return null;
   return el(
     'div',
     { class: 'banner banner-warn' },
-    el('span', {}, 'Spotify Premium is required for in-browser playback. Browsing works without it, but “Sing” needs Premium on the connected account.'),
+    el('span', {}, 'Spotify Premium is required for playback. Browsing still works.'),
   );
 }
 
@@ -1177,10 +1614,9 @@ async function startDuet(
   allTracks?: Track[],
 ): Promise<void> {
   if (store.me?.product && store.me.product !== 'premium') {
-    toast('Spotify Premium is required for in-browser playback. Connect a Premium account — or use Audius or local files.', 'error');
+    toast('Spotify Premium is required for in-browser playback. YouTube mode is free.', 'error');
     return;
   }
-  // Synchronous user-gesture work: unlock the SDK's audio element where supported.
   prewarmPlayer();
   store.player?.activate();
   button.disabled = true;
@@ -1197,8 +1633,6 @@ async function startDuet(
     : {
         source: 'spotify',
         kind: 'loose',
-        // Queue the rest of the search results behind the chosen song so the
-        // room's "Up next" keeps working after this track ends.
         looseUris: [
           track.uri ?? '',
           ...(allTracks ?? [])
@@ -1212,495 +1646,419 @@ async function startDuet(
 }
 
 /* ------------------------------------------------------------
-   Audius — free, keyless streaming
+   Guides — index, articles, and the setup modal
    ------------------------------------------------------------ */
 
-let audiusTracks: FreeTrack[] = [];
-let audiusTrending: FreeTrack[] = [];
-let audiusLoading = false;
-let audiusError = '';
-let audiusMode: 'trending' | 'search' = 'trending';
-let audiusSeq = 0;
-let audiusQuery = '';
-
-export function goAudius(): void {
-  leaveRoomIfActive();
-  audiusSeq++;
-  audiusTracks = [];
-  audiusLoading = false;
-  audiusError = '';
-  audiusMode = 'trending';
-  audiusQuery = '';
-  renderAudiusScreen();
-  if (audiusTrending.length) {
-    audiusTracks = audiusTrending;
-    refreshAudiusResults();
-  } else {
-    void loadAudiusTrending();
-  }
+interface GuideStep {
+  icon: IconName;
+  title: string;
+  body: string;
+  code?: string;
+  link?: { label: string; href: string };
 }
 
-function renderAudiusScreen(): void {
+interface Guide {
+  slug: GuideSlug;
+  icon: IconName;
+  kicker: string;
+  title: string;
+  lede: string;
+  steps: GuideStep[];
+  notes: string[];
+  cta: { label: string; action: () => void };
+}
+
+const GUIDES: Record<GuideSlug, Guide> = {
+  youtube: {
+    slug: 'youtube',
+    icon: 'youtube',
+    kicker: 'Free mode',
+    title: 'Sing with YouTube',
+    lede: 'YouTube has nearly every song. Solo searches it with your own Google key and plays the official YouTube player inside the room.',
+    steps: [
+      {
+        icon: 'book',
+        title: 'Open Google Cloud',
+        body: 'Go to Google Cloud Console and create a project — or pick one you already use.',
+        link: { label: 'console.cloud.google.com', href: 'https://console.cloud.google.com/' },
+      },
+      {
+        icon: 'youtube',
+        title: 'Enable YouTube Data API v3',
+        body: 'Open “APIs & Services” → “Library”, search for “YouTube Data API v3”, and press Enable.',
+        link: {
+          label: 'Open the API library',
+          href: 'https://console.cloud.google.com/apis/library/youtube.googleapis.com',
+        },
+      },
+      {
+        icon: 'key',
+        title: 'Create an API key',
+        body: 'Open “Credentials” → “Create credentials” → “API key”. Copy the key that starts with AIza.',
+        link: {
+          label: 'Open credentials',
+          href: 'https://console.cloud.google.com/apis/credentials',
+        },
+      },
+      {
+        icon: 'music',
+        title: 'Restrict the key',
+        body: 'Under “Application restrictions”, choose Websites and add this site plus http://localhost:5173 if you develop locally. Under “API restrictions”, allow YouTube Data API v3.',
+      },
+      {
+        icon: 'check',
+        title: 'Paste it into Solo',
+        body: 'Open YouTube in Solo and paste the key. It is stored in this browser only and sent straight to Google — never to a Solo server.',
+      },
+    ],
+    notes: [
+      'Every Google project gets 10,000 free quota units per day. A search costs 100 units; loading trending costs 1.',
+      '“API not enabled” usually clears a minute after you press Enable. Reload the page and try again.',
+      'Some videos cannot be embedded. Solo detects this and skips to the next song automatically.',
+      'An unrestricted key works, but website + API restrictions stop someone else using it if it leaks.',
+    ],
+    cta: { label: 'Open YouTube', action: () => goYouTube() },
+  },
+  spotify: {
+    slug: 'spotify',
+    icon: 'spotify',
+    kicker: 'Premium mode',
+    title: 'Sing with Spotify',
+    lede: 'Solo uses your own Spotify app. You never share a password or a client secret — only the public Client ID.',
+    steps: [
+      {
+        icon: 'spotify',
+        title: 'Open the developer dashboard',
+        body: 'Sign in at developer.spotify.com/dashboard. A free account can create an app; playback needs Spotify Premium.',
+        link: { label: 'developer.spotify.com/dashboard', href: 'https://developer.spotify.com/dashboard' },
+      },
+      {
+        icon: 'music',
+        title: 'Create an app',
+        body: 'Press “Create app”, name it Solo, and add the exact Redirect URI below. A mismatch blocks sign-in.',
+        code: redirectUri(),
+      },
+      {
+        icon: 'user',
+        title: 'Add your Spotify account',
+        body: 'In the app, open “User Management” and add the email of every Spotify account that will sing. Development Mode allows up to 5 users.',
+      },
+      {
+        icon: 'key',
+        title: 'Copy the Client ID',
+        body: 'Open the app → Settings and copy the Client ID (32 hexadecimal characters). Never copy the Client secret into Solo — it is not used.',
+      },
+      {
+        icon: 'check',
+        title: 'Paste and connect',
+        body: 'Paste the Client ID into Solo and sign in. Your playlists and search appear once Spotify approves the connection.',
+      },
+    ],
+    notes: [
+      'A redirect mismatch shows “INVALID_CLIENT” or “redirect_uri mismatch”. Copy the URI above character for character.',
+      'A 403 usually means the account is missing from User Management, or the account has no Premium.',
+      'The Client ID is public by design. The Client secret is not — keep it out of Solo, screenshots, and source code.',
+      'Development Mode apps need every singer added to the allowlist. Publish your app only if you want other Spotify accounts to use it.',
+    ],
+    cta: { label: 'Connect Spotify', action: () => renderConnectScreen() },
+  },
+  recording: {
+    slug: 'recording',
+    icon: 'record',
+    kicker: 'Studio',
+    title: 'Save a take',
+    lede: 'Studio records your microphone and the song into one file on your device. Nothing is uploaded anywhere.',
+    steps: [
+      {
+        icon: 'screen',
+        title: 'Use desktop Chrome or Edge',
+        body: 'Tab-audio capture is a desktop browser feature. Mobile browsers do not share the sound of a tab.',
+      },
+      {
+        icon: 'record',
+        title: 'Start a take',
+        body: 'Open Studio in the room and press Record. When the picker appears, choose “This tab”.',
+      },
+      {
+        icon: 'volume',
+        title: 'Switch on “Share tab audio”',
+        body: 'This is the switch that puts the song into the recording. Without it the take contains your voice only.',
+      },
+      {
+        icon: 'download',
+        title: 'Sing, stop, save',
+        body: 'Press Stop when the take ends. The file downloads automatically and stays available in Studio until you leave the room.',
+      },
+    ],
+    notes: [
+      'Headphones keep the microphone from re-recording the song and give Auto mode a cleaner signal.',
+      'YouTube and Spotify both play through protected embedded players, so tab capture is the only way to record the song.',
+      'Leaving the room stops an active take and saves what has been recorded so far.',
+    ],
+    cta: { label: 'Start singing', action: () => goHome() },
+  },
+};
+
+function isGuideSlug(value: string | undefined): value is GuideSlug {
+  return value === 'youtube' || value === 'spotify' || value === 'recording';
+}
+
+export function goGuides(slug?: GuideSlug): void {
+  leaveRoomIfActive();
+  const hash = slug ? `#/guides/${slug}` : '#/guides';
+  if (location.hash === hash) {
+    handleGuideRoute();
+    return;
+  }
+  location.hash = hash;
+}
+
+export function handleGuideRoute(): boolean {
+  if (!location.hash.startsWith('#/guides')) return false;
+  leaveRoomIfActive();
+  const raw = location.hash.split('/')[2];
+  if (isGuideSlug(raw)) renderGuidePage(raw);
+  else renderGuidesIndex();
+  return true;
+}
+
+function renderGuidesIndex(): void {
+  document.title = 'Setup guides — Solo';
+  const order: GuideSlug[] = ['youtube', 'spotify', 'recording'];
   const content = el(
     'main',
-    { class: 'page free-page' },
+    { class: 'page m-page' },
     el(
       'section',
-      { class: 'page-hero free-hero', 'data-source': 'audius' },
+      { class: 'container m-page-head' },
+      el(
+        'a',
+        { class: 'm-back', href: '#', onclick: (e) => { e.preventDefault(); goHome(); } },
+        icon('arrowLeft', 16),
+        el('span', {}, 'Home'),
+      ),
       el(
         'div',
-        { class: 'container' },
-        el(
-          'a',
-          { class: 'back-link', href: '#', onclick: (e) => { e.preventDefault(); goHome(); } },
-          icon('arrowLeft', 16),
-          el('span', {}, 'All music sources'),
-        ),
+        { class: 'm-title-row' },
+        el('span', { class: 'm-title-icon', 'data-source': 'guide' }, icon('book', 30)),
         el(
           'div',
-          { class: 'free-head' },
-          el('span', { class: 'free-icon' }, icon('globe', 30)),
-          el(
-            'div',
-            { class: 'free-head-text' },
-            el('span', { class: 'eyebrow' }, 'Audius · free · no account'),
-            el('h2', {}, 'Independent music, ready to sing.'),
-            el(
-              'p',
-              { class: 'lede' },
-              'Audius streams music from independent artists straight into Solo. Search anything or start with what is trending — no sign-in, no subscription.',
-            ),
-          ),
+          { class: 'm-title-text' },
+          el('span', { class: 'm-kicker' }, 'Read'),
+          el('h2', {}, 'Setup guides'),
         ),
-        el(
-          'div',
-          { class: 'search-row free-search' },
-          el('input', {
-            class: 'input',
-            id: 'audius-search',
-            type: 'search',
-            placeholder: 'Search Audius — songs, artists, moods',
-            autocomplete: 'off',
-          }),
-          el(
+      ),
+      el('p', { class: 'm-page-sub' }, 'Everything the short screens leave out.'),
+    ),
+    el(
+      'section',
+      { class: 'container m-body' },
+      el(
+        'div',
+        { class: 'm-guide-grid' },
+        ...order.map((slug) => {
+          const guide = GUIDES[slug];
+          return el(
             'button',
             {
-              class: 'btn',
-              id: 'audius-refresh',
-              title: 'Refresh trending music',
-              onclick: () => void loadAudiusTrending(),
+              class: 'm-guide-card',
+              'data-source': slug,
+              onclick: () => goGuides(slug),
             },
-            icon('refresh', 16),
-            el('span', {}, 'Trending'),
-          ),
-        ),
-      ),
-    ),
-    el(
-      'div',
-      { class: 'container' },
-      el('div', { class: 'free-toolbar' }, el('span', { class: 'muted', id: 'audius-count' }, 'Loading Audius…')),
-      el('div', { id: 'audius-results' }, el('div', { class: 'empty-state' }, el('h3', {}, 'Loading free music…'))),
-      el(
-        'p',
-        { class: 'free-attrib' },
-        'Music powered by ',
-        el('a', { href: 'https://audius.co', target: '_blank', rel: 'noopener' }, 'Audius'),
-        '. Audius is a free, artist-first streaming platform; some tracks may disappear when an artist removes them.',
+            el('span', { class: 'm-guide-card-icon' }, icon(guide.icon, 28)),
+            el('span', { class: 'm-guide-card-kicker' }, guide.kicker),
+            el('strong', {}, guide.title),
+            el('span', { class: 'm-guide-card-meta' }, `${guide.steps.length} steps`),
+            el('span', { class: 'm-guide-card-arrow' }, icon('arrowRight', 18)),
+          );
+        }),
       ),
     ),
   );
-  shell(content, { active: 'audius' });
-
-  const search = document.getElementById('audius-search') as HTMLInputElement;
-  let debounce = 0;
-  search.addEventListener('input', () => {
-    window.clearTimeout(debounce);
-    const query = search.value.trim();
-    debounce = window.setTimeout(() => void runAudiusSearch(query), 320);
-  });
-  search.addEventListener('keydown', (e) => {
-    if (e.key !== 'Enter') return;
-    window.clearTimeout(debounce);
-    void runAudiusSearch(search.value.trim());
-  });
-  refreshAudiusResults();
+  shell(content, { active: 'guides' });
+  window.scrollTo(0, 0);
 }
 
-async function loadAudiusTrending(): Promise<void> {
-  const seq = ++audiusSeq;
-  audiusMode = 'trending';
-  audiusQuery = '';
-  audiusLoading = true;
-  audiusError = '';
-  refreshAudiusResults();
-  try {
-    const tracks = await trendingAudius(40);
-    if (seq !== audiusSeq) return;
-    audiusTrending = tracks;
-    audiusTracks = tracks;
-    if (!tracks.length) audiusError = 'Audius returned no playable tracks right now. Try refresh in a moment.';
-  } catch (err) {
-    if (seq !== audiusSeq) return;
-    audiusError = err instanceof Error ? err.message : 'Audius could not be reached.';
-  } finally {
-    if (seq === audiusSeq) {
-      audiusLoading = false;
-      refreshAudiusResults();
-    }
-  }
-}
-
-async function runAudiusSearch(query: string): Promise<void> {
-  if (query === audiusQuery && audiusMode === 'search' && (audiusTracks.length || audiusLoading)) return;
-  if (!query) {
-    audiusMode = 'trending';
-    audiusQuery = '';
-    audiusTracks = audiusTrending;
-    audiusError = audiusTrending.length ? '' : audiusError;
-    refreshAudiusResults();
-    if (!audiusTrending.length && !audiusLoading) void loadAudiusTrending();
-    return;
-  }
-
-  const seq = ++audiusSeq;
-  audiusMode = 'search';
-  audiusQuery = query;
-  audiusLoading = true;
-  audiusError = '';
-  audiusTracks = [];
-  refreshAudiusResults();
-  try {
-    const tracks = await searchAudius(query, 40);
-    if (seq !== audiusSeq) return;
-    audiusTracks = tracks;
-    if (!tracks.length) audiusError = `No Audius tracks matched “${query}”. Try a different spelling or a broader search.`;
-  } catch (err) {
-    if (seq !== audiusSeq) return;
-    audiusError = err instanceof Error ? err.message : 'Audius search failed.';
-  } finally {
-    if (seq === audiusSeq) {
-      audiusLoading = false;
-      refreshAudiusResults();
-    }
-  }
-}
-
-function refreshAudiusResults(): void {
-  const results = document.getElementById('audius-results');
-  const count = document.getElementById('audius-count');
-  if (!results) return;
-  const refreshBtn = document.getElementById('audius-refresh') as HTMLButtonElement | null;
-  if (refreshBtn) refreshBtn.disabled = audiusLoading;
-
-  if (count) {
-    count.textContent = audiusLoading
-      ? audiusMode === 'search'
-        ? 'Searching Audius…'
-        : 'Loading trending music…'
-      : audiusMode === 'search'
-        ? audiusTracks.length
-          ? `${audiusTracks.length} results for “${audiusQuery}”`
-          : 'No results'
-        : audiusTracks.length
-          ? `${audiusTracks.length} trending tracks`
-          : 'Trending on Audius';
-  }
-
-  if (audiusLoading && !audiusTracks.length) {
-    results.replaceChildren(
-      el('div', { class: 'empty-state' }, el('h3', {}, audiusMode === 'search' ? 'Searching Audius…' : 'Finding free music…'), el('p', {}, 'This usually takes a second.')),
-    );
-    return;
-  }
-
-  if (audiusError) {
-    results.replaceChildren(
-      el(
-        'div',
-        { class: 'empty-state' },
-        el('h3', {}, audiusMode === 'search' ? 'That search did not work' : 'Could not load Audius'),
-        el('p', {}, audiusError),
-        el(
-          'div',
-          { class: 'cta-row' },
-          el('button', {
-            class: 'btn btn-primary',
-            onclick: () => void (audiusMode === 'search' ? runAudiusSearch(audiusQuery) : loadAudiusTrending()),
-          }, icon('refresh', 16), el('span', {}, 'Try again')),
-          el('button', { class: 'btn', onclick: () => goLocal() }, icon('folder', 16), el('span', {}, 'Use local files')),
-        ),
-      ),
-    );
-    return;
-  }
-
-  if (!audiusTracks.length) {
-    results.replaceChildren(
-      el('div', { class: 'empty-state' }, el('h3', {}, 'No playable free tracks yet'), el('p', {}, 'Search for another song, or load trending music again.')),
-    );
-    return;
-  }
-
-  results.replaceChildren(freeTrackList(audiusTracks, 'audius'));
-}
-
-/* ------------------------------------------------------------
-   Local audio files
-   ------------------------------------------------------------ */
-
-let localTracks: FreeTrack[] = [];
-
-export function goLocal(): void {
-  leaveRoomIfActive();
-  renderLocalScreen();
-}
-
-function renderLocalScreen(): void {
-  const input = el('input', {
-    type: 'file',
-    id: 'local-files',
-    accept: 'audio/*,.mp3,.m4a,.aac,.flac,.wav,.ogg,.oga,.opus,.webm',
-    multiple: true,
-    hidden: 'true',
-  }) as HTMLInputElement;
-  input.addEventListener('change', () => {
-    if (input.files) addLocalFiles(input.files);
-    input.value = '';
-  });
-
-  const dropZone = el(
-    'div',
-    {
-      class: 'drop-zone',
-      role: 'button',
-      tabindex: '0',
-      'aria-label': 'Choose audio files from this device',
-      onclick: () => input.click(),
-      onkeydown: (e) => {
-        const event = e as KeyboardEvent;
-        if (event.key === 'Enter' || event.key === ' ') {
-          event.preventDefault();
-          input.click();
-        }
-      },
-      ondragover: (e) => {
-        e.preventDefault();
-        dropZone.classList.add('dragging');
-      },
-      ondragleave: () => dropZone.classList.remove('dragging'),
-      ondrop: (e) => {
-        e.preventDefault();
-        dropZone.classList.remove('dragging');
-        const files = (e as DragEvent).dataTransfer?.files;
-        if (files) addLocalFiles(files);
-      },
-    },
-    el('span', { class: 'drop-icon' }, icon('upload', 28)),
-    el('h3', {}, 'Drop songs here'),
-    el('p', {}, 'or click to choose audio files from this device'),
-    el('span', { class: 'drop-formats' }, 'MP3 · M4A · WAV · FLAC · OGG · OPUS'),
-  );
-
+function renderGuidePage(slug: GuideSlug): void {
+  const guide = GUIDES[slug];
+  document.title = `${guide.title} — Solo`;
   const content = el(
     'main',
-    { class: 'page free-page' },
+    { class: 'page m-page m-article' },
     el(
-      'section',
-      { class: 'page-hero free-hero', 'data-source': 'local' },
+      'article',
+      { class: 'container m-article-inner' },
       el(
-        'div',
-        { class: 'container' },
-        el(
-          'a',
-          { class: 'back-link', href: '#', onclick: (e) => { e.preventDefault(); goHome(); } },
-          icon('arrowLeft', 16),
-          el('span', {}, 'All music sources'),
-        ),
-        el(
-          'div',
-          { class: 'free-head' },
-          el('span', { class: 'free-icon' }, icon('folder', 30)),
+        'a',
+        { class: 'm-back', href: '#/guides', onclick: (e) => { e.preventDefault(); goGuides(); } },
+        icon('arrowLeft', 16),
+        el('span', {}, 'All guides'),
+      ),
+      el(
+        'header',
+        { class: 'm-article-head', 'data-source': slug },
+        el('span', { class: 'm-article-icon' }, icon(guide.icon, 34)),
+        el('span', { class: 'm-kicker' }, guide.kicker),
+        el('h1', {}, guide.title),
+        el('p', { class: 'm-article-lede' }, guide.lede),
+      ),
+      el(
+        'ol',
+        { class: 'm-guide-steps' },
+        ...guide.steps.map((step, index) =>
           el(
-            'div',
-            { class: 'free-head-text' },
-            el('span', { class: 'eyebrow' }, 'Local files · private · on-device'),
-            el('h2', {}, 'Your music, on your device.'),
+            'li',
+            {},
+            el('span', { class: 'm-guide-step-k' }, String(index + 1).padStart(2, '0')),
             el(
-              'p',
-              { class: 'lede' },
-              'Pick audio files from this device and sing with them. The files are read in your browser only — Solo never uploads them. Studio takes save straight to your downloads.',
+              'div',
+              { class: 'm-guide-step-body' },
+              el('div', { class: 'm-guide-step-title' }, icon(step.icon, 18), el('h2', {}, step.title)),
+              el('p', {}, step.body),
+              step.code ? el('code', {}, step.code) : null,
+              step.link
+                ? el(
+                    'a',
+                    {
+                      class: 'm-guide-step-link',
+                      href: step.link.href,
+                      target: '_blank',
+                      rel: 'noopener',
+                    },
+                    el('span', {}, step.link.label),
+                    icon('externalLink', 14),
+                  )
+                : null,
             ),
           ),
         ),
-        input,
-        dropZone,
+      ),
+      el(
+        'aside',
+        { class: 'm-guide-notes' },
+        el('h2', {}, 'Good to know'),
+        el(
+          'ul',
+          {},
+          ...guide.notes.map((note) => el('li', {}, note)),
+        ),
+      ),
+      el(
+        'div',
+        { class: 'm-article-cta' },
+        el('button', { class: 'btn btn-primary', onclick: guide.cta.action }, guide.cta.label),
+        el(
+          'a',
+          { class: 'btn', href: '#/guides', onclick: (e) => { e.preventDefault(); goGuides(); } },
+          'More guides',
+        ),
+      ),
+    ),
+  );
+  shell(content, { active: 'guides' });
+  window.scrollTo(0, 0);
+}
+
+function openGuideModal(slug: 'youtube' | 'spotify'): void {
+  const guide = GUIDES[slug];
+  let close = (): void => {};
+
+  const overlay = el('div', {
+    class: 'm-modal',
+    role: 'dialog',
+    'aria-modal': 'true',
+    'aria-label': guide.title,
+  });
+  const closeBtn = el(
+    'button',
+    {
+      class: 'icon-btn',
+      'aria-label': 'Close guide',
+      title: 'Close (Esc)',
+      onclick: () => close(),
+    },
+    icon('close', 18),
+  ) as HTMLButtonElement;
+
+  const card = el(
+    'div',
+    { class: 'm-modal-card', 'data-source': slug },
+    el(
+      'div',
+      { class: 'm-modal-head' },
+      el(
+        'div',
+        { class: 'm-modal-title' },
+        el('span', { class: 'm-modal-icon' }, icon(guide.icon, 22)),
+        el(
+          'div',
+          {},
+          el('span', { class: 'm-kicker' }, guide.kicker),
+          el('h2', {}, guide.title),
+        ),
+      ),
+      closeBtn,
+    ),
+    el(
+      'ol',
+      { class: 'm-modal-steps' },
+      ...guide.steps.slice(0, 4).map((step, index) =>
+        el(
+          'li',
+          {},
+          el('span', { class: 'm-modal-k' }, String(index + 1)),
+          el(
+            'div',
+            {},
+            el('strong', {}, step.title),
+            el('p', {}, step.body),
+            step.code ? el('code', {}, step.code) : null,
+          ),
+        ),
       ),
     ),
     el(
       'div',
-      { class: 'container' },
+      { class: 'm-modal-actions' },
       el(
-        'div',
-        { class: 'free-toolbar' },
-        el('span', { class: 'muted', id: 'local-count' }, 'No files chosen yet'),
-        localTracks.length
-          ? el(
-              'button',
-              {
-                class: 'btn btn-small btn-ghost',
-                onclick: () => {
-                  localTracks = [];
-                  refreshLocalResults();
-                },
-              },
-              icon('close', 15),
-              el('span', {}, 'Clear all'),
-            )
-          : null,
+        'a',
+        {
+          class: 'btn btn-primary',
+          href: `#/guides/${slug}`,
+          onclick: () => close(),
+        },
+        icon('book', 16),
+        el('span', {}, 'Read the full guide'),
       ),
-      el('div', { id: 'local-results' }),
-      el(
-        'div',
-        { class: 'note-card local-note' },
-        el(
-          'p',
-          {},
-          'Tip: name files “Artist - Song.mp3” and Solo uses that as the artist and title when it looks up lyrics. If lyrics are missing, the duet and Studio still work.',
-        ),
-        el(
-          'p',
-          {},
-          'Audio formats depend on your browser’s codecs. MP3 and M4A are the safest choices across Chrome, Edge, Firefox and Safari.',
-        ),
-      ),
+      el('button', { class: 'btn', onclick: () => close() }, 'Close'),
     ),
   );
-  shell(content, { active: 'local' });
-  refreshLocalResults();
-}
+  overlay.append(card);
 
-function addLocalFiles(files: FileList | File[]): void {
-  const incoming = localTracksFromFiles(files);
-  if (!incoming.length) {
-    toast('No audio files found. Choose an MP3, WAV, M4A, FLAC, OGG or OPUS file.', 'error');
-    return;
-  }
-  const seen = new Set(
-    localTracks
-      .map((track) => (track.file ? `${track.file.name}:${track.file.size}` : ''))
-      .filter(Boolean),
-  );
-  const fresh = incoming.filter((track) => {
-    const key = track.file ? `${track.file.name}:${track.file.size}` : '';
-    if (seen.has(key)) return false;
-    seen.add(key);
-    return true;
+  const onKey = (e: KeyboardEvent): void => {
+    if (e.key === 'Escape') {
+      e.preventDefault();
+      close();
+    }
+  };
+
+  close = (): void => {
+    document.removeEventListener('keydown', onKey);
+    overlay.remove();
+    closeBtn.focus();
+  };
+
+  overlay.addEventListener('click', (e) => {
+    if (e.target === overlay) close();
   });
-  localTracks = [...localTracks, ...fresh];
-  refreshLocalResults();
-  toast(
-    fresh.length
-      ? `${fresh.length} ${fresh.length === 1 ? 'song' : 'songs'} ready. Nothing was uploaded.`
-      : 'Those files are already in the list.',
-  );
-}
-
-function refreshLocalResults(): void {
-  const results = document.getElementById('local-results');
-  const count = document.getElementById('local-count');
-  if (!results) return;
-  if (count) {
-    count.textContent = localTracks.length
-      ? `${localTracks.length} ${localTracks.length === 1 ? 'file' : 'files'} ready`
-      : 'No files chosen yet';
-  }
-  if (!localTracks.length) {
-    results.replaceChildren(
-      el(
-        'div',
-        { class: 'empty-state' },
-        el('h3', {}, 'Choose a song to start'),
-        el('p', {}, 'Files stay on this device. You can add more at any time.'),
-      ),
-    );
-    return;
-  }
-  results.replaceChildren(freeTrackList(localTracks, 'local'));
+  document.addEventListener('keydown', onKey);
+  document.body.append(overlay);
+  requestAnimationFrame(() => closeBtn.focus());
 }
 
 /* ------------------------------------------------------------
-   Shared free track list + room
+   Shared
    ------------------------------------------------------------ */
-
-function freeTrackList(tracks: FreeTrack[], source: FreeSource): HTMLElement {
-  return el(
-    'div',
-    { class: 'track-list free-track-list' },
-    ...tracks.map((track, index) =>
-      el(
-        'div',
-        { class: 'track-row' },
-        el('span', { class: 'track-idx' }, String(index + 1)),
-        artwork(
-          track.artworkUrl ? [{ url: track.artworkUrl }] : undefined,
-          'track-thumb',
-          `Artwork for ${track.name}`,
-          '♪',
-        ),
-        el(
-          'div',
-          { class: 'track-main' },
-          el('div', { class: 'track-name' }, track.name),
-          el(
-            'div',
-            { class: 'track-artists' },
-            track.artist,
-            el('span', { class: 'source-chip' }, source === 'audius' ? 'Audius' : 'Local'),
-          ),
-        ),
-        el(
-          'span',
-          { class: 'track-duration' },
-          track.durationMs
-            ? formatMs(track.durationMs)
-            : track.file
-              ? formatBytes(track.file.size)
-              : '—',
-        ),
-        el(
-          'button',
-          {
-            class: 'btn btn-small btn-neutral',
-            onclick: () => startFreeRoom(source, tracks, index),
-          },
-          icon('mic', 15),
-          el('span', {}, 'Sing'),
-        ),
-      ),
-    ),
-  );
-}
-
-function startFreeRoom(source: FreeSource, tracks: FreeTrack[], index: number): void {
-  if (!tracks.length) return;
-  renderRoom(
-    {
-      source,
-      kind: 'loose',
-      playlistName: source === 'audius' ? 'Audius · free music' : 'Local files',
-      freeTracks: tracks,
-      freeIndex: index,
-    },
-    () => (source === 'audius' ? goAudius() : goLocal()),
-  );
-}
-
-function formatBytes(bytes: number): string {
-  if (!Number.isFinite(bytes) || bytes <= 0) return '—';
-  if (bytes < 1024 * 1024) return `${Math.max(1, Math.round(bytes / 1024))} KB`;
-  return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
-}
 
 export function leaveRoomIfActive(): void {
   if (store.roomActive) closeRoom();

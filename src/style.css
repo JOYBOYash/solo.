@@ -639,7 +639,7 @@ code {
   color: var(--fg);
 }
 
-.source-card[data-source='audius'] .source-icon,
+.source-card[data-source='youtube'] .source-icon,
 .source-card[data-source='spotify'] .source-icon {
   background: var(--green-tint);
   color: var(--green-bright);
