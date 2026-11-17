@@ -315,7 +315,6 @@ function homeSourceCard(opts: {
       'data-source': opts.source,
       onclick: opts.onClick,
     },
-    el('span', { class: 'm-source-glow', 'aria-hidden': 'true' }),
     el('span', { class: 'm-source-top' }, el('span', { class: 'm-source-tag' }, opts.tag)),
     el('span', { class: 'm-source-icon' }, icon(opts.iconName, 36)),
     el('span', { class: 'm-source-title' }, opts.title),
