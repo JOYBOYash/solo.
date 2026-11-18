@@ -28,8 +28,9 @@ and the YouTube key is shared from the build environment.
 - **YouTube mode** — live search and trending music through the YouTube Data
   API v3, with a visual thumbnail grid. Playback uses the official YouTube
   IFrame player, which stays visible in a small dock inside the room.
-- **Spotify mode** — connect your own Spotify app with PKCE, browse your
-  playlists, search Spotify-wide, and play through the Web Playback SDK.
+- **Spotify mode** — connect your Spotify account with PKCE (a shared app Client
+  ID, or your own on self-hosted copies), browse your playlists, search
+  Spotify-wide, and play through the Web Playback SDK.
 - **Room** — a dark, icon-first stage. Time-synced lyrics from LRCLIB (with a
   lyrics.ovh fallback), a live mic meter, and artwork-tinted ambience.
 - **Duet engine** — while the mic hears your voice, the song drops to a backing
@@ -61,7 +62,7 @@ always sing *with* the record, and the record sings back when you rest.
   and an API key. The deployment supplies one shared key so visitors need no
   setup. The free daily quota is 10,000 units; a search costs 100 and trending
   costs 1, so the shared key supports roughly 100 searches a day. For heavier
-  traffic, deploy a copy without a shared key so visitors can use their own.
+  traffic, request a quota increase from Google or lean on Spotify.
 - **Spotify mode:** a Spotify developer app Client ID, your account on the app's
   User Management allowlist in Development Mode, and Spotify Premium for
   playback. No client secret is used.
@@ -76,21 +77,36 @@ npm run dev
 Open **http://127.0.0.1:5173**. Spotify only accepts loopback IP redirect URIs,
 so use `127.0.0.1` rather than `localhost` if you plan to connect Spotify.
 
-No environment variables are required to run Solo. Without them, visitors use
-the bring-your-own-key setup. To offer shared, ready-to-use sources from this
-deployment, run:
+No environment variables are required for local development. `npm run dev` is a
+development build, so it offers the bring-your-own-key and
+bring-your-own-Client-ID setup screens. A production build behaves differently:
+it never asks visitors for credentials and only shows the sources configured at
+build time.
+
+To give a local production build shared, ready-to-use sources, run:
 
 ```bash
 copy .env.example .env.local
 # then set VITE_YOUTUBE_API_KEY=your-google-api-key
 # and/or VITE_SPOTIFY_CLIENT_ID=your-32-character-client-id
+npm run build
+npm run preview
 ```
+
+Supported names are `VITE_YOUTUBE_API_KEY`, `YOUTUBE_API_KEY`,
+`GOOGLE_API_KEY` and `YT_API_KEY` for YouTube, plus `VITE_SPOTIFY_CLIENT_ID` and
+`SPOTIFY_CLIENT_ID` for Spotify. The `VITE_`-less aliases are useful on hosts
+such as Vercel. Everything is compiled at build time, so restart the dev server
+or rebuild after changing a value.
 
 The YouTube key is inlined into the static bundle, so treat it as public and
 restrict it to your website and the YouTube Data API v3. Its free quota is
 shared by every visitor. `VITE_SPOTIFY_REDIRECT_URI` is only needed when the
 public URL differs from the browser's origin. Quote it in `.env.local` when the
 value contains `#`. Never add a Spotify client secret.
+
+A self-hosted production copy can opt back into visitor-supplied credentials
+with `VITE_ALLOW_PERSONAL_KEYS=1`. Leave that unset for a public launch.
 
 ## Deploy on Vercel
 
@@ -100,21 +116,30 @@ Solo is a fully static SPA.
 2. In Vercel, **Add New → Project** and import it.
 3. Confirm **Framework preset: Vite**, **Build command: `npm run build`**,
    **Output directory: `dist`**.
-4. Deploy. `vercel.json` rewrites unknown paths to `index.html`, so `/callback`
+4. Before the first deploy, open **Settings → Environment Variables** and add:
+   - `VITE_YOUTUBE_API_KEY` (or `YOUTUBE_API_KEY`) — shared YouTube source.
+   - `VITE_SPOTIFY_CLIENT_ID` (or `SPOTIFY_CLIENT_ID`) — shared Spotify app.
+   Set both for **Production** (and **Preview** if you use preview URLs).
+5. Deploy. `vercel.json` rewrites unknown paths to `index.html`, so `/callback`
    works as an SPA route.
 
-Add the production redirect URI shown in Solo's Spotify setup screen to your
-Spotify app. For a public launch, add `VITE_YOUTUBE_API_KEY` under **Settings →
-Environment Variables** (and optionally `VITE_SPOTIFY_CLIENT_ID`). Without the
-YouTube key, visitors see the bring-your-own-key setup instead.
+Environment variables are baked into the bundle. After changing one, trigger a
+new deployment — editing the variable alone does not update the live site.
+Visitors never see a key form in a production build. A missing source shows a
+clean unavailable state, and the browser console names the variable to add.
+Add `https://your-domain/callback` to your Spotify app's Redirect URIs, and add
+every singing account to User Management while the app is in Development Mode.
+`VITE_ALLOW_PERSONAL_KEYS=1` restores visitor-supplied keys for a self-hosted
+build, but should stay unset on a public deployment.
 
 ## Keys and setup
 
 ### YouTube
 
-Visitors need no key. Set `VITE_YOUTUBE_API_KEY` in `.env.local` or Vercel, and
-Solo shows the ready-to-use mode with no setup screen. The YouTube screen and
-the guide at `#/guides/youtube` then skip the key steps entirely.
+Visitors need no key. Set `VITE_YOUTUBE_API_KEY` (or `YOUTUBE_API_KEY`) in
+`.env.local` or your host's environment and rebuild. Solo then shows the
+ready-to-use YouTube screen with no setup form, and the guide at
+`#/guides/youtube` becomes a three-step singing guide.
 
 The key is public in the static bundle. Restrict it in
 [Google Cloud Console](https://console.cloud.google.com/) to **Websites** (your
@@ -123,14 +148,31 @@ Its free quota is shared by every visitor: about 100 searches a day, while the
 trending shelf costs far less thanks to a `videos.list` call at 1 unit.
 
 Quota errors, disabled APIs and website restrictions produce friendly messages
-without asking visitors to change a key they never entered.
+without asking visitors to change a key they never entered. If a production
+build has no key, YouTube shows an unavailable state instead of a key form.
 
-For self-hosted copies without an env key, visitors can still open **YouTube →
-Add your YouTube key**. That key is then stored in their browser only.
+A self-hosted production copy can restore the browser-stored key screen with
+`VITE_ALLOW_PERSONAL_KEYS=1` at build time. Development builds always allow it.
+
+#### What the shared key can and cannot see
+
+A Google API key is a project credential, not a login. It allows read-only calls
+to public YouTube Data API endpoints — Solo only uses `search.list` and
+`videos.list`. It does **not** sign anyone into YouTube, and it cannot read or
+change the owner's channel, subscriptions, watch history, recommendations,
+playlists, or personal feed. It is not tied to a YouTube account at all. The only
+shared resource is the Google Cloud project's daily API quota.
 
 ### Spotify
 
-Open **Spotify → Add your app key → How to get your key**. The full article is at
+A public deployment sets `VITE_SPOTIFY_CLIENT_ID` (or `SPOTIFY_CLIENT_ID`) and
+rebuilds. Visitors press **Connect Spotify**, approve access on Spotify's page,
+and continue with their own account. The Client ID is public by design; no
+client secret is used. Playback requires Spotify Premium.
+
+For a self-hosted build that lets each visitor supply their own Spotify app,
+build with `VITE_ALLOW_PERSONAL_KEYS=1`. The setup form then appears under
+**Spotify → Add your app key → How to get your key**, and the full article is at
 `#/guides/spotify`. In short:
 
 1. Create an app at [developer.spotify.com/dashboard](https://developer.spotify.com/dashboard).

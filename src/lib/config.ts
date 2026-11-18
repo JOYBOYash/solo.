@@ -1,14 +1,19 @@
 // Runtime configuration. Solo uses the public PKCE flow, so only the Client ID
-// is needed — no secret. By default every singer connects their OWN Spotify app
-// (paste the Client ID once, stored in this browser only), which keeps Solo
-// usable by anyone on any host without Spotify quota approval. A deployment can
-// also provide a shared Client ID through VITE_SPOTIFY_CLIENT_ID; a ?client_id=
-// URL parameter still works for one-off shares.
+// is needed — no secret. A public deployment supplies one shared Client ID so
+// visitors just connect their own Spotify account. Development builds and
+// self-hosted copies can fall back to a Client ID pasted into this browser.
+// A ?client_id= URL parameter still works for one-off shares.
+
+import { allowPersonalSources } from './deployment';
 
 const CLIENT_ID_KEY = 'solo.clientId';
 const CLIENT_ID_PATTERN = /^[0-9a-f]{32}$/i;
 
-const ENV_CLIENT_ID = (import.meta.env.VITE_SPOTIFY_CLIENT_ID ?? '').trim();
+const ENV_CLIENT_ID = (
+  (typeof __SOLO_SPOTIFY_CLIENT_ID__ === 'string' ? __SOLO_SPOTIFY_CLIENT_ID__ : '') ||
+  import.meta.env.VITE_SPOTIFY_CLIENT_ID ||
+  ''
+).trim();
 const ENV_REDIRECT_URI = (import.meta.env.VITE_SPOTIFY_REDIRECT_URI ?? '').trim();
 
 /** True when a valid Client ID is compiled into this deployment. */
@@ -21,11 +26,13 @@ export function deploymentClientId(): string | null {
   return CLIENT_ID_PATTERN.test(ENV_CLIENT_ID) ? ENV_CLIENT_ID : null;
 }
 
-/** The Client ID used for sign-in: a browser override first, then the deployment default. */
+/** The Client ID used for sign-in: the shared app first in public builds, then a browser override. */
 export function getClientId(): string | null {
+  const deployment = deploymentClientId();
+  if (deployment && !allowPersonalSources()) return deployment;
   const id = localStorage.getItem(CLIENT_ID_KEY)?.trim();
   if (id && CLIENT_ID_PATTERN.test(id)) return id;
-  return deploymentClientId();
+  return deployment;
 }
 
 export function setClientId(id: string): void {
@@ -38,7 +45,13 @@ export function clearClientId(): void {
 
 /** True when the browser is overriding a deployment-provided Client ID. */
 export function hasLocalClientIdOverride(): boolean {
+  if (hasDeploymentClientId() && !allowPersonalSources()) return false;
   return Boolean(localStorage.getItem(CLIENT_ID_KEY)?.trim());
+}
+
+/** True when this build can ask for a personal Spotify app Client ID. */
+export function allowsPersonalSpotify(): boolean {
+  return allowPersonalSources();
 }
 
 /**

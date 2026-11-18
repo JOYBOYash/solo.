@@ -8,11 +8,19 @@
 // IFrame Player (see youtube-player.ts).
 
 import type { YouTubeTrack } from './playback';
+import { allowPersonalSources } from './deployment';
 
 const KEY_STORAGE = 'solo.youtubeKey';
 const KEY_PREFIX = 'AIza';
 const API = 'https://www.googleapis.com/youtube/v3';
-const ENV_KEY = (import.meta.env.VITE_YOUTUBE_API_KEY ?? '').trim();
+
+// Vite reads the deployment environment at build time. Support the common
+// naming variants so a key added as YOUTUBE_API_KEY / GOOGLE_API_KEY still works.
+const ENV_KEY = (
+  (typeof __SOLO_YOUTUBE_API_KEY__ === 'string' ? __SOLO_YOUTUBE_API_KEY__ : '') ||
+  import.meta.env.VITE_YOUTUBE_API_KEY ||
+  ''
+).trim();
 
 export class YouTubeApiError extends Error {
   readonly status: number;
@@ -28,7 +36,7 @@ export class YouTubeApiError extends Error {
 
 /** The shared key compiled into this deployment, if one is configured. */
 export function deploymentYouTubeKey(): string | null {
-  return looksLikeYouTubeKey(ENV_KEY) ? ENV_KEY : null;
+  return ENV_KEY || null;
 }
 
 export function hasDeploymentYouTubeKey(): boolean {
@@ -45,7 +53,9 @@ function storedYouTubeKey(): string | null {
 }
 
 export function getYouTubeKey(): string | null {
-  return deploymentYouTubeKey() ?? storedYouTubeKey();
+  const shared = deploymentYouTubeKey();
+  if (shared) return shared;
+  return allowPersonalSources() ? storedYouTubeKey() : null;
 }
 
 export function hasYouTubeKey(): boolean {

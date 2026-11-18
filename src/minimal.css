@@ -67,6 +67,13 @@
   text-align: left;
 }
 
+.m-hero-note {
+  max-width: 52ch;
+  margin-top: 18px;
+  color: var(--fg-faint);
+  font-size: 12.5px;
+}
+
 .m-source-card {
   position: relative;
   min-height: 246px;
@@ -1299,6 +1306,11 @@
   gap: 8px;
   padding: 56px 20px;
   color: var(--fg-muted);
+}
+
+.m-state-wide {
+  max-width: 720px;
+  margin: 0 auto;
 }
 
 .m-state-icon {

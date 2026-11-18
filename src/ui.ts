@@ -4,11 +4,13 @@
 
 import {
   getClientId,
+  deploymentClientId,
   clearClientId,
   hasDeploymentClientId,
   hasLocalClientIdOverride,
   redirectUri,
   setClientId,
+  allowsPersonalSpotify,
 } from './lib/config';
 import { login, logout, isLoggedIn } from './lib/auth';
 import {
@@ -40,6 +42,7 @@ import {
 } from './lib/youtube';
 import type { YouTubeTrack } from './lib/playback';
 import { installApp, isStandalone } from './lib/pwa';
+import { allowPersonalSources } from './lib/deployment';
 import { icon, type IconName } from './icons';
 
 const app = document.getElementById('app') as HTMLElement;
@@ -102,6 +105,7 @@ function navLink(
 function shell(content: HTMLElement, opts?: { active?: NavSection }): void {
   const me = store.me;
   const loggedIn = isLoggedIn();
+  const spotifyReady = loggedIn && Boolean(getClientId());
   const active = opts?.active;
   document.body.style.background = '';
 
@@ -122,10 +126,10 @@ function shell(content: HTMLElement, opts?: { active?: NavSection }): void {
           { class: 'nav-links', 'aria-label': 'Music sources' },
           navLink('YouTube', 'youtube', active === 'youtube', () => goYouTube()),
           navLink(
-            loggedIn ? 'Playlists' : 'Spotify',
+            spotifyReady ? 'Playlists' : 'Spotify',
             'spotify',
             active === 'spotify',
-            () => (loggedIn ? void goLibrary() : renderConnectScreen()),
+            () => (spotifyReady ? void goLibrary() : renderConnectScreen()),
           ),
           navLink('Guides', 'book', active === 'guides', () => goGuides()),
         ),
@@ -182,11 +186,13 @@ function shell(content: HTMLElement, opts?: { active?: NavSection }): void {
             { href: 'https://lrclib.net', target: '_blank', rel: 'noopener' },
             'LRCLIB',
           ),
-          el(
-            'a',
-            { href: 'https://developer.spotify.com/dashboard', target: '_blank', rel: 'noopener' },
-            'Spotify Developers',
-          ),
+          allowsPersonalSpotify()
+            ? el(
+                'a',
+                { href: 'https://developer.spotify.com/dashboard', target: '_blank', rel: 'noopener' },
+                'Spotify Developers',
+              )
+            : null,
         ),
       ),
     ),
@@ -207,8 +213,11 @@ export function renderHome(): void {
   document.title = 'Solo — sing with any song';
   const ytReady = hasYouTubeKey();
   const ytShared = hasDeploymentYouTubeKey();
-  const spotifyReady = Boolean(getClientId() ?? (hasDeploymentClientId() ? 'deployment' : ''));
-  const spotifyConnected = isLoggedIn();
+  const ytPersonal = allowPersonalSources();
+  const spotifyReady = Boolean(getClientId());
+  const spotifyPersonal = allowsPersonalSpotify();
+  const spotifyConnected = spotifyReady && isLoggedIn();
+  const nothingReady = !ytReady && !spotifyReady && !ytPersonal && !spotifyPersonal;
 
   const content = el(
     'main',
@@ -233,21 +242,52 @@ export function renderHome(): void {
           { class: 'm-source-grid' },
           homeSourceCard({
             source: 'youtube',
-            tag: ytShared ? 'Free · ready' : ytReady ? 'Key saved' : 'Free · your key',
+            tag: ytShared
+              ? 'Free · ready'
+              : ytReady
+                ? 'Key saved'
+                : ytPersonal
+                  ? 'Free · your key'
+                  : 'Unavailable',
             title: 'YouTube',
-            meta: ytShared ? 'No sign-in' : ytReady ? 'Trending & search' : '2-minute setup',
+            meta: ytShared
+              ? 'No sign-in'
+              : ytReady
+                ? 'Trending & search'
+                : ytPersonal
+                  ? '2-minute setup'
+                  : 'Not configured',
             iconName: 'youtube',
             onClick: () => goYouTube(),
           }),
           homeSourceCard({
             source: 'spotify',
-            tag: spotifyConnected ? 'Connected' : spotifyReady ? 'Premium · ready' : 'Premium · your app',
+            tag: spotifyConnected
+              ? 'Connected'
+              : spotifyReady
+                ? 'Premium · ready'
+                : spotifyPersonal
+                  ? 'Premium · your app'
+                  : 'Unavailable',
             title: 'Spotify',
-            meta: spotifyConnected ? 'Your playlists' : spotifyReady ? 'Connect Spotify' : '2-minute setup',
+            meta: spotifyConnected
+              ? 'Your playlists'
+              : spotifyReady
+                ? 'Connect Spotify'
+                : spotifyPersonal
+                  ? '2-minute setup'
+                  : 'Not configured',
             iconName: 'spotify',
             onClick: () => (spotifyConnected ? void goLibrary() : renderConnectScreen()),
           }),
         ),
+        nothingReady
+          ? el(
+              'p',
+              { class: 'm-hero-note' },
+              'Solo has no sources set up yet.',
+            )
+          : null,
       ),
     ),
     el(
@@ -345,7 +385,7 @@ export function goYouTube(): void {
   ytError = '';
   ytMode = 'trending';
   ytQuery = '';
-  ytEditingKey = !hasYouTubeKey();
+  ytEditingKey = !hasYouTubeKey() && allowPersonalSources();
   renderYouTubeScreen();
   if (!ytEditingKey) {
     if (ytTrending.length) {
@@ -361,7 +401,11 @@ function renderYouTubeScreen(): void {
   document.title = 'YouTube — Solo';
   const hasKey = hasYouTubeKey();
   const sharedKey = hasDeploymentYouTubeKey();
-  const canChangeKey = hasKey && !ytEditingKey && !sharedKey;
+  const personal = allowPersonalSources();
+  const showSetup = personal && (!hasKey || ytEditingKey);
+  const showResults = hasKey && !ytEditingKey;
+  const canChangeKey = personal && hasKey && !ytEditingKey && !sharedKey;
+  const kicker = !hasKey && !personal ? 'Unavailable' : 'Free mode';
   const content = el(
     'main',
     { class: 'page m-page' },
@@ -381,7 +425,7 @@ function renderYouTubeScreen(): void {
         el(
           'div',
           { class: 'm-title-text' },
-          el('span', { class: 'm-kicker' }, 'Free mode'),
+          el('span', { class: 'm-kicker' }, kicker),
           el('h2', {}, 'YouTube'),
         ),
         canChangeKey
@@ -401,7 +445,7 @@ function renderYouTubeScreen(): void {
             )
           : null,
       ),
-      hasKey && !ytEditingKey
+      showResults
         ? el(
             'div',
             { class: 'm-searchbar' },
@@ -432,7 +476,7 @@ function renderYouTubeScreen(): void {
     el(
       'section',
       { class: 'container m-body' },
-      hasKey && !ytEditingKey
+      showResults
         ? el(
             'div',
             { class: 'm-toolbar' },
@@ -445,14 +489,16 @@ function renderYouTubeScreen(): void {
             ),
           )
         : null,
-      ytEditingKey || !hasKey
+      showSetup
         ? youtubeSetupCard()
-        : el(
-            'div',
-            { id: 'yt-results' },
-            el('div', { class: 'm-state' }, el('span', { class: 'm-spinner' })),
-          ),
-      hasKey && !ytEditingKey
+        : showResults
+          ? el(
+              'div',
+              { id: 'yt-results' },
+              el('div', { class: 'm-state' }, el('span', { class: 'm-spinner' })),
+            )
+          : youtubeUnavailableCard(),
+      showResults
         ? el(
             'p',
             { class: 'm-attrib' },
@@ -465,7 +511,7 @@ function renderYouTubeScreen(): void {
   );
   shell(content, { active: 'youtube' });
 
-  if (!hasKey || ytEditingKey) return;
+  if (!showResults) return;
 
   const search = document.getElementById('yt-search') as HTMLInputElement | null;
   if (!search) return;
@@ -488,6 +534,37 @@ function renderYouTubeScreen(): void {
   });
 
   refreshYouTubeResults();
+}
+
+function youtubeUnavailableCard(): HTMLElement {
+  return el(
+    'div',
+    { class: 'm-state m-state-wide' },
+    el('span', { class: 'm-state-icon' }, icon('alert', 28)),
+    el('h3', {}, 'YouTube is unavailable here'),
+    el(
+      'p',
+      {},
+      hasDeploymentClientId()
+        ? 'This copy of Solo does not include YouTube. Spotify is ready when you connect.'
+        : 'This copy of Solo does not include YouTube.',
+    ),
+    hasDeploymentClientId()
+      ? el(
+          'div',
+          { class: 'm-state-actions' },
+          el(
+            'button',
+            {
+              class: 'btn btn-primary',
+              onclick: () => renderConnectScreen(),
+            },
+            icon('spotify', 16),
+            el('span', {}, 'Use Spotify'),
+          ),
+        )
+      : null,
+  );
 }
 
 function youtubeSetupCard(): HTMLElement {
@@ -693,7 +770,7 @@ function refreshYouTubeResults(): void {
             icon('refresh', 16),
             el('span', {}, 'Try again'),
           ),
-          hasDeploymentYouTubeKey()
+          hasDeploymentYouTubeKey() || !allowPersonalSources()
             ? null
             : el(
                 'button',
@@ -781,15 +858,17 @@ function startYouTubeRoom(index: number): void {
 }
 
 /* ------------------------------------------------------------
-   Spotify — connect with a personal app Client ID
+   Spotify — connect with a shared or personal app Client ID
    ------------------------------------------------------------ */
 
 export function renderConnectScreen(error?: string, forceSetup = false): void {
   document.title = 'Spotify — Solo';
   leaveRoomIfActive();
   clearHash();
-  const clientId = forceSetup ? null : getClientId();
-  const deploymentId = hasDeploymentClientId();
+  const deploymentId = deploymentClientId();
+  const personal = allowsPersonalSpotify();
+  const clientId = forceSetup && personal ? null : getClientId();
+  const usingDeployment = Boolean(clientId && deploymentId && !hasLocalClientIdOverride());
 
   const content = el(
     'main',
@@ -821,98 +900,146 @@ export function renderConnectScreen(error?: string, forceSetup = false): void {
       { class: 'container m-body' },
       error ? el('p', { class: 'form-error m-connect-error' }, error) : null,
       clientId
-        ? el(
-            'div',
-            { class: 'm-connect-card' },
-            el('span', { class: 'm-connect-icon' }, icon('check', 24)),
-            el(
-              'div',
-              { class: 'm-connect-copy' },
-              el('h3', {}, 'App key saved'),
-              el('p', {}, 'Connect a Premium account to start playback.'),
-            ),
-            el(
-              'button',
-              {
-                class: 'btn btn-primary',
-                onclick: async (e) => {
-                  const btn = e.currentTarget as HTMLButtonElement;
-                  btn.disabled = true;
-                  btn.textContent = 'Opening Spotify…';
-                  try {
-                    await login();
-                  } catch (err) {
-                    toast(err instanceof Error ? err.message : 'Could not start sign-in.', 'error');
-                    btn.disabled = false;
-                    btn.textContent = 'Connect Spotify';
-                  }
-                },
-              },
-              icon('spotify', 17),
-              el('span', {}, 'Connect Spotify'),
-            ),
-            el(
-              'div',
-              { class: 'm-inline-actions' },
-              el(
-                'button',
-                {
-                  class: 'm-toolbar-link',
-                  onclick: () => {
-                    clearClientId();
-                    renderConnectScreen(undefined, deploymentId);
-                  },
-                },
-                'Change key',
-              ),
-              el(
-                'button',
-                {
-                  class: 'm-toolbar-link',
-                  onclick: () => openGuideModal('spotify'),
-                },
-                'Setup guide',
-              ),
-              el('a', { class: 'm-toolbar-link', href: '#/guides/spotify' }, 'Full article'),
-            ),
-          )
-        : spotifySetupCard(deploymentId),
-      forceSetup && deploymentId
+        ? spotifyConnectCard(usingDeployment || !personal)
+        : personal
+          ? spotifySetupCard(Boolean(deploymentId))
+          : spotifyUnavailableCard(),
+      forceSetup && deploymentId && personal
         ? el(
             'div',
             { class: 'm-inline-actions' },
             el(
               'button',
               { class: 'm-toolbar-link', onclick: () => renderConnectScreen() },
-              'Use the deployment’s app',
+              'Use the shared Spotify app',
             ),
           )
         : null,
-      clientId && deploymentId && !hasLocalClientIdOverride()
-        ? el('p', { class: 'm-attrib' }, 'This deployment uses its own Spotify app.')
+      clientId && deploymentId && !usingDeployment && personal
+        ? el('p', { class: 'm-attrib' }, 'This browser uses its own Spotify app.')
         : null,
-      el(
-        'div',
-        { class: 'm-escape' },
-        el(
-          'div',
-          { class: 'm-escape-copy' },
-          el('span', { class: 'm-escape-icon' }, icon('youtube', 20)),
-          el('p', {}, 'No Spotify Premium? YouTube mode is free.'),
-        ),
-        el(
-          'button',
-          {
-            class: 'btn btn-small',
-            onclick: () => goYouTube(),
-          },
-          icon('youtube', 15),
-          el('span', {}, 'Use YouTube'),
-        ),
-      ),
+      hasYouTubeKey()
+        ? el(
+            'div',
+            { class: 'm-escape' },
+            el(
+              'div',
+              { class: 'm-escape-copy' },
+              el('span', { class: 'm-escape-icon' }, icon('youtube', 20)),
+              el('p', {}, 'No Spotify Premium? YouTube mode is free.'),
+            ),
+            el(
+              'button',
+              {
+                class: 'btn btn-small',
+                onclick: () => goYouTube(),
+              },
+              icon('youtube', 15),
+              el('span', {}, 'Use YouTube'),
+            ),
+          )
+        : null,
     ),
   );
   shell(content, { active: 'spotify' });
+}
+
+function spotifyConnectCard(shared: boolean): HTMLElement {
+  return el(
+    'div',
+    { class: 'm-connect-card' },
+    el('span', { class: 'm-connect-icon' }, icon(shared ? 'spotify' : 'check', 24)),
+    el(
+      'div',
+      { class: 'm-connect-copy' },
+      el('h3', {}, shared ? 'Connect Spotify' : 'Spotify app ready'),
+      el(
+        'p',
+        {},
+        shared
+          ? 'Sign in with a Premium account. Your playlists and playback appear here.'
+          : 'Connect a Premium account to load your playlists.',
+      ),
+    ),
+    el(
+      'button',
+      {
+        class: 'btn btn-primary',
+        onclick: async (e) => {
+          const btn = e.currentTarget as HTMLButtonElement;
+          btn.disabled = true;
+          btn.textContent = 'Opening Spotify…';
+          try {
+            await login();
+          } catch (err) {
+            toast(err instanceof Error ? err.message : 'Could not start sign-in.', 'error');
+            btn.disabled = false;
+            btn.textContent = 'Connect Spotify';
+          }
+        },
+      },
+      icon('spotify', 17),
+      el('span', {}, 'Connect Spotify'),
+    ),
+    el(
+      'div',
+      { class: 'm-inline-actions' },
+      shared
+        ? el(
+            'button',
+            { class: 'm-toolbar-link', onclick: () => openGuideModal('spotify') },
+            'How it works',
+          )
+        : el(
+            'button',
+            {
+              class: 'm-toolbar-link',
+              onclick: () => {
+                clearClientId();
+                renderConnectScreen();
+              },
+            },
+            'Change key',
+          ),
+      shared
+        ? null
+        : el(
+            'button',
+            { class: 'm-toolbar-link', onclick: () => openGuideModal('spotify') },
+            'Setup guide',
+          ),
+      el('a', { class: 'm-toolbar-link', href: '#/guides/spotify' }, 'Full guide'),
+    ),
+  );
+}
+
+function spotifyUnavailableCard(): HTMLElement {
+  return el(
+    'div',
+    { class: 'm-state m-state-wide' },
+    el('span', { class: 'm-state-icon' }, icon('alert', 28)),
+    el('h3', {}, 'Spotify is unavailable here'),
+    el(
+      'p',
+      {},
+      'This copy of Solo does not include Spotify. YouTube is free and needs no account.',
+    ),
+    hasYouTubeKey()
+      ? el(
+          'div',
+          { class: 'm-state-actions' },
+          el(
+            'button',
+            {
+              class: 'btn btn-primary',
+              onclick: () => goYouTube(),
+            },
+            icon('youtube', 16),
+            el('span', {}, 'Use YouTube'),
+          ),
+        )
+      : null,
+  );
 }
 
 function spotifySetupCard(deploymentId: boolean): HTMLElement {
@@ -994,7 +1121,7 @@ function spotifySetupCard(deploymentId: boolean): HTMLElement {
 export async function goLibrary(): Promise<void> {
   leaveRoomIfActive();
   clearHash();
-  if (!isLoggedIn()) {
+  if (!isLoggedIn() || !getClientId()) {
     renderConnectScreen();
     return;
   }
@@ -1837,8 +1964,47 @@ const SHARED_YOUTUBE_GUIDE: Guide = {
   cta: { label: 'Open YouTube', action: () => goYouTube() },
 };
 
-function guideFor(slug: GuideSlug): Guide {
-  return slug === 'youtube' && hasDeploymentYouTubeKey() ? SHARED_YOUTUBE_GUIDE : GUIDES[slug];
+const SHARED_SPOTIFY_GUIDE: Guide = {
+  slug: 'spotify',
+  icon: 'spotify',
+  kicker: 'Premium mode',
+  title: 'Sing with Spotify',
+  lede: 'Connect your Spotify account and Solo brings your playlists and playback into the room.',
+  steps: [
+    {
+      icon: 'spotify',
+      title: 'Premium is required',
+      body: 'Playback runs through Spotify’s player. A free account can sign in, but Spotify will not stream the song in Solo.',
+    },
+    {
+      icon: 'user',
+      title: 'Connect your account',
+      body: 'Press Connect Spotify and approve access on Spotify’s page. Solo never sees your password.',
+    },
+    {
+      icon: 'music',
+      title: 'Pick a playlist or song',
+      body: 'Your playlists and search appear in the library. Open any track to start the room.',
+    },
+  ],
+  notes: [
+    'Your playlists, queue and listening history stay in your Spotify account.',
+    'Solo stores only your Spotify access token in this browser. Log out any time to remove it.',
+    'No Premium? YouTube mode is free and needs no account.',
+  ],
+  cta: { label: 'Connect Spotify', action: () => renderConnectScreen() },
+};
+
+function guideFor(slug: GuideSlug): Guide | null {
+  if (slug === 'youtube') {
+    if (hasDeploymentYouTubeKey()) return SHARED_YOUTUBE_GUIDE;
+    return allowPersonalSources() ? GUIDES.youtube : null;
+  }
+  if (slug === 'spotify') {
+    if (hasDeploymentClientId()) return SHARED_SPOTIFY_GUIDE;
+    return allowsPersonalSpotify() ? GUIDES.spotify : null;
+  }
+  return GUIDES.recording;
 }
 
 function isGuideSlug(value: string | undefined): value is GuideSlug {
@@ -1867,6 +2033,9 @@ export function handleGuideRoute(): boolean {
 function renderGuidesIndex(): void {
   document.title = 'Setup guides — Solo';
   const order: GuideSlug[] = ['youtube', 'spotify', 'recording'];
+  const guides = order
+    .map((slug) => guideFor(slug))
+    .filter((guide): guide is Guide => guide !== null);
   const content = el(
     'main',
     { class: 'page m-page' },
@@ -1898,22 +2067,21 @@ function renderGuidesIndex(): void {
       el(
         'div',
         { class: 'm-guide-grid' },
-        ...order.map((slug) => {
-          const guide = guideFor(slug);
-          return el(
+        ...guides.map((guide) =>
+          el(
             'button',
             {
               class: 'm-guide-card',
-              'data-source': slug,
-              onclick: () => goGuides(slug),
+              'data-source': guide.slug,
+              onclick: () => goGuides(guide.slug),
             },
             el('span', { class: 'm-guide-card-icon' }, icon(guide.icon, 32)),
             el('span', { class: 'm-guide-card-kicker' }, guide.kicker),
             el('strong', {}, guide.title),
             el('span', { class: 'm-guide-card-meta' }, `${guide.steps.length} steps`),
             el('span', { class: 'm-guide-card-arrow' }, icon('arrowRight', 18)),
-          );
-        }),
+          ),
+        ),
       ),
     ),
   );
@@ -1923,6 +2091,10 @@ function renderGuidesIndex(): void {
 
 function renderGuidePage(slug: GuideSlug): void {
   const guide = guideFor(slug);
+  if (!guide) {
+    renderGuidesIndex();
+    return;
+  }
   document.title = `${guide.title} — Solo`;
   const content = el(
     'main',
@@ -2003,6 +2175,7 @@ function renderGuidePage(slug: GuideSlug): void {
 
 function openGuideModal(slug: 'youtube' | 'spotify'): void {
   const guide = guideFor(slug);
+  if (!guide) return;
   let close = (): void => {};
 
   const overlay = el('div', {
